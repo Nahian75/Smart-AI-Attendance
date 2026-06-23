@@ -1,0 +1,17 @@
+# GPU override — apply on top of docker-compose.prod.yml when NVIDIA GPU is present
+# Usage: docker compose -f docker-compose.prod.yml -f docker-compose.prod.gpu.yml up -d
+
+services:
+  edge_node:
+    build:
+      context: ./edge
+      dockerfile: Dockerfile.edge
+    environment:
+      DEVICE: cuda
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

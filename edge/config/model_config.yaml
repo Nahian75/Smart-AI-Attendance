@@ -1,0 +1,10 @@
+yolo:
+  conf_threshold: 0.45
+  iou_threshold: 0.50
+  img_size: 640
+arcface:
+  model_name: buffalo_l       # InsightFace pack: SCRFD + ArcFace R100
+  det_size: [640, 640]
+tensorrt:
+  enabled: false              # set true after exporting .engine files
+  precision: fp16

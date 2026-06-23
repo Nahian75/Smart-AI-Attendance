@@ -1,0 +1,16 @@
+# Intel GPU override — apply on top of docker-compose.prod.yml
+# Works with Intel Arc, Iris Xe, and UHD integrated graphics via OpenVINO
+# Usage: docker compose -f docker-compose.prod.yml -f docker-compose.prod.intel.yml up -d
+
+services:
+  edge_node:
+    build:
+      context: ./edge
+      dockerfile: Dockerfile.edge.intel
+    environment:
+      DEVICE: openvino
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render

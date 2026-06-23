@@ -1,0 +1,11 @@
+ultralytics==8.3.55          # YOLOv11 + built-in ByteTrack/BoT-SORT
+insightface==0.7.3           # ArcFace R100 + SCRFD face detector
+onnxruntime-gpu==1.20.1
+faiss-cpu==1.9.0             # swap for faiss-gpu on CUDA hosts
+opencv-python==4.10.0.84
+numpy==2.2.1
+redis==5.2.1
+aiokafka==0.12.0
+httpx==0.28.1
+pyyaml==6.0.2
+aiohttp==3.11.11

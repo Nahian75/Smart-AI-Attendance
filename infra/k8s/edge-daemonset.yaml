@@ -1,0 +1,25 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: attendance-edge
+spec:
+  selector:
+    matchLabels: { app: attendance-edge }
+  template:
+    metadata:
+      labels: { app: attendance-edge }
+    spec:
+      nodeSelector: { hardware: gpu }      # only schedule on GPU/Jetson nodes
+      hostNetwork: true                    # for RTSP camera access on LAN
+      containers:
+        - name: edge
+          image: registry.example.com/attendance-edge:latest
+          envFrom:
+            - secretRef: { name: attendance-secrets }
+          resources:
+            limits: { nvidia.com/gpu: 1 }
+          volumeMounts:
+            - { name: config, mountPath: /app/config }
+      volumes:
+        - name: config
+          configMap: { name: edge-camera-config }

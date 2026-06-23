@@ -1,0 +1,30 @@
+# AMD ROCm edge node — tested on RDNA2+ (RX 6000/7000 series) and CDNA (MI series)
+# Requires: ROCm drivers installed on host, /dev/kfd + /dev/dri mounted
+FROM rocm/pytorch:rocm6.2.4_ubuntu22.04_py3.11_pytorch_release_2.3.0
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 libgomp1 && rm -rf /var/lib/apt/lists/*
+
+# Replace nvidia onnxruntime-gpu with AMD ROCm version
+COPY requirements.txt .
+RUN grep -v "onnxruntime" requirements.txt > requirements.amd.txt && \
+    pip install --no-cache-dir -r requirements.amd.txt && \
+    pip install --no-cache-dir \
+        onnxruntime-rocm \
+        --extra-index-url https://download.pytorch.org/whl/rocm6.2
+
+# Pre-download InsightFace models
+RUN python -c "\
+from insightface.app import FaceAnalysis; \
+app = FaceAnalysis(name='buffalo_l', providers=['ROCMExecutionProvider', 'CPUExecutionProvider']); \
+app.prepare(ctx_id=0, det_size=(640,640)); \
+print('InsightFace buffalo_l ready (ROCm)')"
+
+# Pre-download YOLO model
+RUN python -c "from ultralytics import YOLO; YOLO('yolo11s.pt')"
+
+COPY . .
+CMD ["python", "-m", "src.main"]

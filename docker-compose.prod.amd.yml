@@ -1,0 +1,17 @@
+# AMD ROCm override — apply on top of docker-compose.prod.yml
+# Usage: docker compose -f docker-compose.prod.yml -f docker-compose.prod.amd.yml up -d
+# Host requirements: ROCm drivers installed, user in 'render' and 'video' groups
+
+services:
+  edge_node:
+    build:
+      context: ./edge
+      dockerfile: Dockerfile.edge.amd
+    environment:
+      DEVICE: rocm
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render

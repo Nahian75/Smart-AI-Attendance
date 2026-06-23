@@ -1,0 +1,34 @@
+# Intel GPU edge node — Intel Arc, Iris Xe, and integrated Graphics via OpenVINO
+# Works without any special host driver beyond the standard i915/xe kernel module
+FROM ubuntu:22.04
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1 DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-pip python3.11-dev \
+    libgl1 libglib2.0-0 libgomp1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -sf python3.11 /usr/bin/python3 \
+    && ln -sf python3.11 /usr/bin/python \
+    && ln -sf pip3 /usr/bin/pip
+
+# Swap onnxruntime-gpu for OpenVINO variant
+COPY requirements.txt .
+RUN grep -v "onnxruntime" requirements.txt > requirements.intel.txt && \
+    pip install --no-cache-dir -r requirements.intel.txt && \
+    pip install --no-cache-dir openvino onnxruntime-openvino
+
+# Pre-download InsightFace + YOLO models
+# OpenVINO provider used for inference; ctx_id=-1 (CPU path in InsightFace API,
+# but OpenVINO provider accelerates the underlying ONNX models on the iGPU/Arc)
+RUN python -c "\
+from insightface.app import FaceAnalysis; \
+app = FaceAnalysis(name='buffalo_l', providers=['OpenVINOExecutionProvider', 'CPUExecutionProvider']); \
+app.prepare(ctx_id=-1, det_size=(640,640)); \
+print('InsightFace buffalo_l ready (OpenVINO)')"
+
+RUN python -c "from ultralytics import YOLO; YOLO('yolo11s.pt')"
+
+COPY . .
+CMD ["python", "-m", "src.main"]

@@ -1,0 +1,35 @@
+FROM nvcr.io/nvidia/pytorch:24.10-py3
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 gstreamer1.0-plugins-bad gstreamer1.0-libav \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+# The NVIDIA base image ships its own opencv .so; pip uninstall only removes
+# the metadata, leaving the .so behind and causing cv2.typing/DictValue mismatches.
+# Hard-delete the entire cv2 directory first so pip installs a clean copy.
+# Force numpy<2.0 so the opencv .so (compiled against numpy 1.x ABI) loads cleanly.
+# Finally, ensure onnxruntime-gpu wins over the CPU variant pulled by sub-deps.
+RUN pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true && \
+    rm -rf /usr/local/lib/python3.10/dist-packages/cv2 && \
+    pip install --no-cache-dir -r requirements.txt && \
+    pip install --no-cache-dir "numpy<2.0" --force-reinstall && \
+    pip uninstall -y onnxruntime 2>/dev/null || true && \
+    pip install --no-cache-dir onnxruntime-gpu==1.20.1
+
+COPY . .
+
+# Pre-download YOLO model into the image so container starts immediately without network fetch.
+RUN python -c "from ultralytics import YOLO; YOLO('yolo11s.pt')" && ls -lh yolo11s.pt
+
+# Pre-download InsightFace buffalo_l model pack into the image.
+# Force CPUExecutionProvider here: the build step has no GPU access, and letting
+# onnxruntime-gpu probe CUDA at build time segfaults. Runtime still uses GPU
+# normally since arcface.py passes ctx_id=0 (no providers override) when DEVICE=cuda.
+RUN python -c "from insightface.app import FaceAnalysis; app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); app.prepare(ctx_id=-1, det_size=(640,640)); print('buffalo_l ready')" && \
+    ls -lh /root/.insightface/models/buffalo_l/
+
+CMD ["python", "-m", "src.main"]

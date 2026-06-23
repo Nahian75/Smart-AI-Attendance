@@ -1,0 +1,21 @@
+tenant_id: demo
+# ── Device ──────────────────────────────────────────────────────────────────
+# "auto"  → uses NVIDIA GPU if available, otherwise CPU (recommended)
+# "cuda"  → force NVIDIA GPU
+# "cpu"   → force CPU (works on any machine, ~2-5 fps per camera)
+device: auto
+use_gstreamer: false          # set true on NVIDIA Jetson for HW decode
+yolo_model: yolo11s.pt        # yolo11n.pt for Jetson, yolo11m.pt for accuracy
+tracker: bytetrack.yaml       # or botsort.yaml
+antispoof_model: ~   # set to weights/antispoof.onnx when you have the model; ~ = pass-through (always live)
+
+# PRD §6.3: all thresholds tunable per deployment
+recognition_threshold: 0.50   # lower for testing; raise to 0.82 for production
+liveness_threshold: 0.80      # PRD §6.3: 0.80
+cooldown_seconds: 10          # 10 sec for testing; raise to 300 for production
+
+# Cameras are loaded from the backend database (registered via the dashboard).
+# Add cameras using the Cameras page in the web UI — no hardcoding needed here.
+# This fallback list is only used if the backend API is unreachable at startup.
+# Leave empty so the edge node waits for backend rather than trying a broken URL.
+cameras: []

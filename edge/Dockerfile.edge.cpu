@@ -1,0 +1,24 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+ENV PYTHONUNBUFFERED=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libgl1 libglib2.0-0 libgomp1 \
+    build-essential gcc g++ \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU-only requirements (swap onnxruntime-gpu for onnxruntime)
+COPY requirements.txt .
+RUN sed 's/onnxruntime-gpu[^ ]*/onnxruntime==1.19.2/' requirements.txt > requirements.cpu.txt && \
+    pip install --no-cache-dir -r requirements.cpu.txt
+
+# Pre-download InsightFace buffalo_l model at build time
+RUN python -c "\
+from insightface.app import FaceAnalysis; \
+a = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); \
+a.prepare(ctx_id=-1, det_size=(640, 640)); \
+print('InsightFace buffalo_l cached.')"
+
+COPY . .
+CMD ["python", "-m", "src.main"]
