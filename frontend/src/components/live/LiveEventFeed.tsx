@@ -5,18 +5,61 @@ import { getSession } from "@/lib/auth";
 import { api } from "@/lib/api";
 import type { LiveEvent } from "@/types";
 
+function eventLabel(e: LiveEvent): { label: string; sub: string; color: string } {
+  // Processed backend event (check_in / check_out)
+  if (e.action && e.action !== "skip") {
+    const late = e.is_late ? " — late" : "";
+    const conf = e.confidence != null ? ` · ${Math.round(e.confidence * 100)}%` : "";
+    return {
+      label: e.employee_name || "Unknown",
+      sub: `${e.action === "check_in" ? "Checked in" : "Checked out"}${late}${conf}`,
+      color: e.is_late
+        ? "bg-amber-50 dark:bg-amber-900/30 text-amber-700 dark:text-amber-400"
+        : "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400",
+    };
+  }
+  // Raw edge event — unknown person
+  if (e.type === "unknown_person") {
+    return {
+      label: "Unknown Person",
+      sub: `Unrecognised face · conf ${Math.round((e.confidence ?? 0) * 100)}%`,
+      color: "bg-orange-50 dark:bg-orange-900/30 text-orange-700 dark:text-orange-400",
+    };
+  }
+  // Raw edge event — spoof attempt
+  if (e.type === "spoof_attempt") {
+    return {
+      label: "Spoof Attempt",
+      sub: `Liveness check failed · score ${((e.spoof_score ?? 0)).toFixed(2)}`,
+      color: "bg-red-50 dark:bg-red-900/30 text-red-700 dark:text-red-400",
+    };
+  }
+  return { label: "Event", sub: e.type ?? "", color: "bg-gray-50 dark:bg-gray-700 text-gray-600 dark:text-gray-300" };
+}
+
+function initials(name: string) {
+  return name.split(" ").map((p) => p[0]).join("").toUpperCase().slice(0, 2);
+}
+
 export default function LiveEventFeed() {
   const [events, setEvents] = useState<LiveEvent[]>([]);
 
   useEffect(() => {
     const s = getSession();
     if (!s) return;
+
+    // Load last 50 processed events from Redis cache
     api.liveFeed().then(setEvents).catch(() => {});
+
     const handle = connectAttendanceWS(s.tenantId, s.token, (e) => {
-      // Only show processed attendance events (have action + employee_name from backend)
-      if (!e.action || e.action === "skip" || !e.employee_name) return;
+      // Skip "skip" actions (cooldown / duplicate) and pings
+      if (e.type === "ping") return;
+      if (e.action === "skip") return;
+      // Accept: check_in / check_out (backend processed) OR unknown_person / spoof_attempt (raw edge)
+      if (!e.action && e.type !== "unknown_person" && e.type !== "spoof_attempt") return;
       setEvents((prev) => [e, ...prev].slice(0, 50));
     });
+
     return () => handle.close();
   }, []);
 
@@ -32,23 +75,29 @@ export default function LiveEventFeed() {
         {events.length === 0 && (
           <p className="text-xs text-gray-400 dark:text-gray-500 p-4">Waiting for events…</p>
         )}
-        {events.map((e, i) => (
-          <div key={i} className="flex items-center gap-3 px-4 py-2.5 border-b dark:border-gray-700 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors">
-            <div className="w-8 h-8 rounded-full bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400 flex items-center justify-center text-xs font-medium">
-              {(e.employee_name || "?").split(" ").map((p: string) => p[0]).join("").toUpperCase()}
+        {events.map((e, i) => {
+          const { label, sub, color } = eventLabel(e);
+          return (
+            <div
+              key={i}
+              className="flex items-center gap-3 px-4 py-2.5 border-b dark:border-gray-700 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors"
+            >
+              <div className={`w-8 h-8 rounded-full flex items-center justify-center text-xs font-medium flex-shrink-0 ${color}`}>
+                {initials(label)}
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-sm font-medium truncate text-gray-900 dark:text-white">{label}</p>
+                <p className="text-xs text-gray-500 dark:text-gray-400 truncate">{sub}</p>
+              </div>
+              <span className="text-xs text-gray-400 dark:text-gray-500 whitespace-nowrap">
+                {e.timestamp
+                  ? new Date(typeof e.timestamp === "number" ? e.timestamp * 1000 : e.timestamp)
+                      .toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
+                  : "now"}
+              </span>
             </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate text-gray-900 dark:text-white">{e.employee_name || "Unknown"}</p>
-              <p className="text-xs text-gray-500 dark:text-gray-400">
-                {e.action === "check_in" ? "Checked in" : "Checked out"}
-                {e.is_late ? " — late" : ""} · {Math.round((e.confidence ?? 0) * 100)}%
-              </p>
-            </div>
-            <span className="text-xs text-gray-400 dark:text-gray-500">
-              {new Date(e.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-            </span>
-          </div>
-        ))}
+          );
+        })}
       </div>
     </div>
   );

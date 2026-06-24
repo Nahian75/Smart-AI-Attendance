@@ -1,11 +1,16 @@
 """Background tasks. Sync wrappers around async DB work for Celery."""
 import asyncio
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import delete, select
 from ..db.base import AsyncSessionLocal
 from ..models import RecognitionEvent, Employee, AttendanceLog
 from ..config import settings
 from .celery_app import celery_app
+
+SNAPSHOT_DIR = "/app/snapshots"
+SNAPSHOT_RETENTION_DAYS = 7
 
 
 def _run(coro):
@@ -44,6 +49,29 @@ def mark_absentees():
             await db.commit()
     _run(_do())
     return "absentees marked"
+
+
+@celery_app.task
+def purge_snapshots():
+    """Delete snapshot image files older than SNAPSHOT_RETENTION_DAYS (default 7 days).
+    Runs nightly — keeps disk usage bounded without touching the DB records."""
+    if not os.path.exists(SNAPSHOT_DIR):
+        return "snapshot dir not found"
+    cutoff = time.time() - (SNAPSHOT_RETENTION_DAYS * 86400)
+    deleted = 0
+    errors = 0
+    for root, dirs, files in os.walk(SNAPSHOT_DIR):
+        for fname in files:
+            if not fname.lower().endswith((".jpg", ".jpeg", ".png")):
+                continue
+            fpath = os.path.join(root, fname)
+            try:
+                if os.path.getmtime(fpath) < cutoff:
+                    os.remove(fpath)
+                    deleted += 1
+            except Exception:
+                errors += 1
+    return f"snapshots purged: {deleted} deleted, {errors} errors"
 
 
 @celery_app.task

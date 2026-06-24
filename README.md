@@ -9,18 +9,22 @@ Built with **YOLOv11 + ByteTrack + InsightFace (ArcFace R100)**, **FastAPI** bac
 ## Features
 
 - **Real-time Face Recognition** — YOLOv11 + ByteTrack + ArcFace R100 with FAISS vector search
+- **Multi-Frame Temporal Voting** — Recognition decided across 7 frames (majority vote + mean similarity), eliminating single-frame flip-flopping
+- **Top-K Embedding Matching** — Averages similarity across an employee's multiple enrolled embeddings for robust identification
+- **Face-Quality Gating** — Junk crops (blurry, turned away) are skipped before recognition; only high-quality detections count
+- **Real Anti-Spoof Model** — Trained MiniFASNet CNN (CelebA-Spoof dataset, AUC-ROC ~0.99) blocks printed-photo and screen-replay attacks
 - **Multi-GPU Support** — NVIDIA (CUDA), AMD (ROCm), Intel (OpenVINO/Arc), CPU — auto-detected at startup
 - **Security Alerts** — 8 types: intruder, blacklist, after-hours, restricted area, VIP, loitering, spoof attempt, unknown person
-- **Liveness / Anti-Spoof** — ONNX-based spoof detection blocks printed-photo and screen-replay attacks
-- **Shift Management** — Create shifts with start/end times, grace periods, and early-leave buffers; assign employees; late/early-leave/overtime calculated automatically
-- **Role-Based Access Control** — 6-level hierarchy (super_admin → viewer) enforced on API and UI; colored role badge in sidebar
-- **Self-Service Password Change** — Any user changes their own password from the sidebar; bcrypt-hashed
+- **Real-Time Alert WebSocket** — Alerts appear instantly on dashboard via `/ws/alerts/` (no polling delay)
+- **Detection Evidence Log** — Every face detection saved with snapshot, timestamp, confidence score, and camera — verify the AI isn't hallucinating
+- **Shift Management** — Create shifts with start/end times, grace periods, and early-leave buffers; late/early-leave/overtime calculated automatically
+- **Live Feed** — Shows check-in/check-out, unknown persons, and spoof attempts in real-time
+- **Role-Based Access Control** — 6-level hierarchy (super_admin → viewer) enforced on API and UI
+- **Self-Service Password Change** — Any user changes their own password from the sidebar
 - **Admin Panel** — Add users, change roles, deactivate accounts
 - **Occupancy Analytics** — Building-wide and per-zone real-time counters
-- **Audit Trail** — Every action logged with user ID, IP, old/new values
 - **GDPR Compliance** — Tenant-wide data deletion endpoint
 - **Dark Mode** — Full dark/light theme toggle, persisted to localStorage
-- **WebSocket Live Feed** — Real-time attendance events and security alerts
 - **CSV Export** — Monthly attendance reports
 - **Celery Background Jobs** — Mark absentees, apply data-retention policy, email digest
 
@@ -30,91 +34,74 @@ Built with **YOLOv11 + ByteTrack + InsightFace (ArcFace R100)**, **FastAPI** bac
 
 ```
 Camera (RTSP / IP / USB)
-  → Edge node: YOLO detect → ByteTrack → face crop → anti-spoof → ArcFace embed → FAISS match
+  → Edge node:
+      YOLO detect → ByteTrack track → 30% padded crop
+      → face-quality gate (det_score ≥ 0.55)
+      → anti-spoof check (MiniFASNet, 128×128 ONNX)
+      → ArcFace embed (960×960 det_size) → top-K FAISS match
+      → multi-frame vote buffer (7 frames, majority wins)
+      → decision: recognized / unknown / spoof
   → POST /api/v1/attendance/event  (EDGE_TOKEN auth)
   → Backend: confidence gate → cooldown → shift check → late/early/OT calc → Postgres
-  → Redis pub/sub → WebSocket → live dashboard
+  → Redis pub/sub → WebSocket → live dashboard (attendance + alerts channels)
 ```
 
 ---
 
-## One-Click Production Deploy
+## Quick Start (Windows)
 
-### Linux / macOS
-```bash
-git clone <repo> && cd smart-ai-attendance
-chmod +x deploy.sh
-./deploy.sh                    # auto-detects IP and GPU
-./deploy.sh yourdomain.com     # with custom domain
-./deploy.sh --update           # rebuild keeping existing .env
 ```
+Double-click start.bat
+```
+
+- First run: builds images and downloads AI models (~10-20 min, once only)
+- Subsequent runs: starts in ~10 seconds, no rebuild, no downloads
+- Dashboard opens automatically at **http://localhost:8080**
+- Default login: `admin@demo.com` / `admin123`
+
+To stop: double-click `stop.bat`
+
+---
+
+## One-Click Production Deploy
 
 ### Windows Server
 ```
 Double-click deploy.bat
 — or —
 deploy.bat yourdomain.com
+deploy.bat --update          # rebuild keeping existing .env secrets
+deploy.bat --no-edge         # run without the camera AI node
+deploy.bat --gpu nvidia      # force GPU type
+```
+
+### Linux / macOS
+```bash
+git clone <repo> && cd smart-ai-attendance
+chmod +x deploy.sh
+./deploy.sh                  # auto-detects IP and GPU
+./deploy.sh yourdomain.com
+./deploy.sh --update
 ```
 
 The deploy script automatically:
 1. Checks Docker is running
-2. **Detects GPU type** (NVIDIA/AMD/Intel) and selects the right Dockerfile and compose override
+2. **Detects GPU type** (NVIDIA/AMD/Intel) and selects the right Dockerfile
 3. Detects server public IP (or uses your domain)
 4. Generates all secrets (`SECRET_KEY`, `FACE_ENCRYPTION_KEY`, `EDGE_TOKEN`, DB passwords) — shown once, stored in `.env`
-5. Builds production images with pre-baked AI models (~10-20 min first run)
-6. Starts all services
-7. Seeds the database
-8. Opens the dashboard
+5. Builds production images with pre-baked AI models
+6. Starts all services, seeds the database, opens dashboard
 
 ### GPU Support Matrix
 
 | Hardware | Dockerfile | ONNX Provider | Torch Device |
 |---|---|---|---|
-| NVIDIA GPU | `Dockerfile.edge.nvidia` | `CUDAExecutionProvider` | `cuda` |
+| NVIDIA GPU | `Dockerfile.edge` / `Dockerfile.edge.nvidia` | `CUDAExecutionProvider` | `cuda` |
 | AMD GPU (ROCm) | `Dockerfile.edge.amd` | `ROCMExecutionProvider` | `cuda` (ROCm compat) |
 | Intel Arc / Iris | `Dockerfile.edge.intel` | `OpenVINOExecutionProvider` | `xpu` / `cpu` |
 | CPU only | `Dockerfile.edge.cpu` | `CPUExecutionProvider` | `cpu` |
 
-Force a specific GPU type:
-```bash
-./deploy.sh --gpu nvidia    # or amd | intel | cpu
-make deploy-amd             # convenience make targets
-```
-
-### make targets
-
-| Command | What it does |
-|---|---|
-| `make deploy` | Production deploy (auto GPU) |
-| `make deploy-gpu` | Force NVIDIA |
-| `make deploy-amd` | Force AMD ROCm |
-| `make deploy-intel` | Force Intel OpenVINO |
-| `make deploy-cpu` | CPU only |
-| `make update` | Rebuild keeping .env |
-| `make prod-logs` | Tail production logs |
-| `make prod-down` | Stop production |
-| `make prod-reset` | Stop + wipe all data |
-
----
-
-## Local Development (one click)
-
-### Windows
-```
-Double-click start.bat
-```
-
-### macOS / Linux
-```bash
-chmod +x start.sh && ./start.sh
-```
-
-Uses `docker-compose.dev.yml` with:
-- Fast backend Dockerfile (no model pre-download — models download on first enrollment)
-- Nginx on port 80
-- CPU edge node (optional, `--profile edge`)
-- Auto-creates `.env` from `.env.dev` on first run
-- Auto-seeds database on first run
+Set `DEVICE=cuda` in `.env` for NVIDIA (auto-detected by `deploy.bat`).
 
 ---
 
@@ -131,43 +118,87 @@ Uses `docker-compose.dev.yml` with:
 
 ---
 
+## Default Ports
+
+| Service | Port | Notes |
+|---|---|---|
+| Dashboard (nginx) | **8080** | Main entry point — `http://localhost:8080` |
+| Backend API | 8000 | Direct access (also via nginx `/api/`) |
+| Edge MJPEG | 8001 | Camera streams (also via nginx `/stream/`) |
+| PostgreSQL | 5432 | |
+| Redis | 6379 | |
+
+> Port 80 is reserved by Docker Desktop on Windows. Nginx binds to 8080.
+
+---
+
+## Recognition Tuning
+
+All thresholds are in `edge/config/camera_config.yaml` — **no rebuild needed**, just restart edge node:
+
+```yaml
+recognition_threshold: 0.50   # raise for fewer false matches, lower for more recall
+liveness_threshold:    0.55   # P(live) below this = spoof (model-based)
+min_det_score:         0.55   # skip face crops below this detection quality
+vote_window:           7      # frames to collect per person before deciding
+min_votes:             4      # minimum good frames needed to decide
+vote_ttl_seconds:      5      # drop vote buffer if person unseen for this long
+cooldown_seconds:      300    # suppress re-detection of same person for 5 min
+```
+
+To apply: `docker compose restart edge_node backend`
+
+**Tips:**
+- If enrolled employees are being missed → lower `recognition_threshold` (try 0.45)
+- If wrong people are matching → raise `recognition_threshold` (try 0.60)
+- Best fix for poor recognition: re-enroll with 3–5 clear front-facing photos under the same lighting as the camera
+
+---
+
+## Dashboard Pages
+
+| Page | Path | Description |
+|---|---|---|
+| Overview | `/dashboard` | Stat cards, live cameras, occupancy, weekly/hourly charts, recent check-ins, live feed, alerts |
+| Employees | `/dashboard/employees` | Employee list, face enrollment, blacklist/VIP flags |
+| Cameras | `/dashboard/cameras` | Camera cards with MJPEG streams, add/edit/delete |
+| **Detection Log** | `/dashboard/detection-log` | Every face detection: snapshot, timestamp, confidence, camera — verify AI accuracy |
+| Alerts | `/dashboard/alerts` | All alert types, unacknowledged filter |
+| Security Alerts | `/dashboard/security-alerts` | High-severity incidents + loitering section |
+| Shifts | `/dashboard/shifts` | Create/edit shifts, assign employees |
+| Analytics | `/dashboard/analytics` | Building occupancy, department breakdown, shift compliance |
+| Reports | `/dashboard/reports` | Monthly CSV export |
+| Admin | `/dashboard/admin` | User management, role assignment (admin+ only) |
+
+### Live Dashboard (Overview)
+
+The overview page shows three real-time panels:
+- **Live Feed** — check-in/check-out events (green), unknown persons (orange), spoof attempts (red), all via WebSocket
+- **Security Alerts** — fires instantly via WebSocket when any alert triggers (no 15s polling delay)
+- **Detection Evidence Log** — browse every captured face with snapshot thumbnail, click to enlarge
+
+---
+
 ## Security Model
 
 ### Authentication & Passwords
-- All API endpoints (except `POST /auth/login`) require a JWT Bearer token
+- All API endpoints (except `POST /auth/login`) require JWT Bearer token
 - Tokens signed with `SECRET_KEY` (HS256), expire after `ACCESS_TOKEN_EXPIRE_HOURS` (default 8 h)
-- All passwords hashed with **bcrypt** via passlib — never stored or logged in plain text
-- Production startup **refuses to start** if `SECRET_KEY`, `FACE_ENCRYPTION_KEY`, or `EDGE_TOKEN` are still set to their insecure defaults
+- All passwords hashed with **bcrypt** — never stored or logged in plain text
 
 ### Role Hierarchy
 
 | Role | Level | Badge | Permissions |
 |---|---|---|---|
 | `super_admin` | 6 | Purple | Everything |
-| `admin` | 5 | Red | Full tenant access: cameras, bulk reset, blacklist/VIP, alert config, user management |
-| `hr` | 4 | Blue | Add/edit/deactivate employees, enroll faces, manual attendance overrides |
-| `manager` | 3 | Green | Read-only + face match endpoint |
+| `admin` | 5 | Red | Full tenant access |
+| `hr` | 4 | Blue | Employees, enrollment, attendance overrides |
+| `manager` | 3 | Green | Read-only + face match |
 | `security` | 2 | Amber | Read-only + acknowledge alerts |
 | `viewer` | 1 | Gray | Read-only dashboard |
 
-### Dashboard UI Permission Matrix
-
-| Action | viewer | security | manager | hr | admin |
-|---|:---:|:---:|:---:|:---:|:---:|
-| View all pages | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Acknowledge alerts | | ✓ | ✓ | ✓ | ✓ |
-| Edit / delete attendance log | | | | ✓ | ✓ |
-| Add / edit / deactivate employee | | | | ✓ | ✓ |
-| Enroll face photos | | | | ✓ | ✓ |
-| Toggle blacklist / VIP | | | | | ✓ |
-| Add / edit / delete cameras | | | | | ✓ |
-| Bulk reset attendance | | | | | ✓ |
-| Manage users and roles | | | | | ✓ |
-
-Every user can **change their own password** from the sidebar.
-
 ### Edge Node Authentication
-Edge nodes send `Authorization: Bearer <EDGE_TOKEN>` when posting recognition events. In development (`EDGE_TOKEN` empty), the check is skipped. In production, a missing or wrong token returns 401.
+Edge nodes send `Authorization: Bearer <EDGE_TOKEN>`. In development (`EDGE_TOKEN` empty), check is skipped. In production, missing/wrong token returns 401.
 
 ### Rate Limiting
 | Path | Limit |
@@ -176,36 +207,14 @@ Edge nodes send `Authorization: Bearer <EDGE_TOKEN>` when posting recognition ev
 | `POST /api/v1/auth/refresh` | 30 req / min / IP |
 | All other endpoints | 200 req / min / IP |
 
-### API Docs
-Swagger (`/api/docs`) and Redoc (`/api/redoc`) are **disabled in production** (`ENVIRONMENT=production`).
+### Face Snapshot Storage & Auto-Purge
+Snapshots are stored at `/app/snapshots` (Docker volume). Served at `/snapshots/` via FastAPI StaticFiles — accessible through nginx at `http://localhost:8080/snapshots/`.
 
----
-
-## Dashboard Pages
-
-| Page | Path | Description |
-|---|---|---|
-| Overview | `/dashboard` | Stat cards, live camera feeds, occupancy, weekly/hourly charts, recent check-ins |
-| Employees | `/dashboard/employees` | Employee list, face enrollment, blacklist/VIP flags |
-| Cameras | `/dashboard/cameras` | Camera cards with MJPEG streams, add/edit/delete |
-| Alerts | `/dashboard/alerts` | All alert types, unacknowledged filter |
-| Security Alerts | `/dashboard/security-alerts` | High-severity incidents + loitering section |
-| Shifts | `/dashboard/shifts` | Create/edit shifts, assign employees, view late/early thresholds |
-| Analytics | `/dashboard/analytics` | Building occupancy, department breakdown, shift compliance |
-| Reports | `/dashboard/reports` | Monthly CSV export, shift compliance summary |
-| Admin | `/dashboard/admin` | User management, role assignment (admin+ only) |
-
-### Sidebar (all pages)
-- Colored **role badge** showing current user's role
-- **Change Password** modal — verifies current password, enforces 8-char minimum
-- Active-page highlight
-- Theme toggle (dark/light)
+**Auto-purge:** A Celery background job runs every night at **3:00 AM** and deletes snapshot image files older than **7 days**. DB records (detection log entries) are kept for **90 days** separately — you can still see the detection event, just without the snapshot image after 7 days.
 
 ---
 
 ## Shift Time Logic
-
-Shifts control how attendance is classified:
 
 | Event | Condition | Result |
 |---|---|---|
@@ -226,55 +235,53 @@ Example: Shift 09:00–18:00, grace 10 min, early buffer 15 min
 1. Go to **Employees** in the dashboard
 2. Click **Add Employee** — fill name, code, department, designation, phone
 3. Click the **face icon** on the employee row
-4. Upload 3–10 clear front-facing photos (drag-and-drop supported)
+4. Upload **3–10 clear front-facing photos** taken in the same lighting as your camera
 5. The backend extracts a 512-d ArcFace embedding and marks the employee as enrolled
 
 The edge node resyncs embeddings from the backend every 60 seconds — no restart needed.
+
+> **Tip:** More photos = better recognition. Photos taken under the exact same lighting and angle as the camera give significantly higher similarity scores.
 
 ---
 
 ## Camera Setup
 
-Register cameras via the dashboard Cameras page or in `edge/config/camera_config.yaml`:
-
-```yaml
-cameras:
-  - id: cam-main
-    rtsp_url: "rtsp://user:pass@192.168.1.10:554/stream"
-    direction: entrance   # entrance | exit | interior
-    fps_target: 5
-```
+Register cameras via the dashboard Cameras page. The edge node polls the backend every 60 seconds for new cameras.
 
 | Source | URL format |
 |---|---|
 | IP camera (RTSP) | `rtsp://user:pass@192.168.1.x:554/...` |
 | HTTP webcam | `http://192.168.x.x:8080/video` |
 | USB webcam (Linux/macOS) | `"0"` or `"1"` |
-| USB webcam (Windows) | use `edge_standalone.py` |
 
 ---
 
 ## API Endpoints
 
-> **[admin]** = `role >= admin` · **[hr]** = `role >= hr` · **[security]** = `role >= security` · JWT = any valid token · EDGE = `EDGE_TOKEN` header
-
 ### Auth
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | POST | `/api/v1/auth/login` | — | Login; returns JWT |
-| POST | `/api/v1/auth/refresh` | — | Refresh still-valid JWT |
+| POST | `/api/v1/auth/refresh` | — | Refresh JWT |
 | POST | `/api/v1/auth/change-password` | JWT | Change own password |
 
 ### Attendance
 | Method | Path | Auth | Description |
 |---|---|---|---|
-| POST | `/api/v1/attendance/event` | EDGE | Ingest recognition event |
+| POST | `/api/v1/attendance/event` | EDGE | Ingest recognition/unknown/spoof event |
 | GET | `/api/v1/attendance/summary` | JWT | Daily summary |
 | GET | `/api/v1/attendance/logs` | JWT | Paginated log history |
-| GET | `/api/v1/attendance/live` | JWT | Last 50 live events |
+| GET | `/api/v1/attendance/live` | JWT | Last 50 live events (Redis) |
 | PATCH | `/api/v1/attendance/logs/{id}` | **[hr]** | Manual override |
 | DELETE | `/api/v1/attendance/logs/{id}` | **[hr]** | Delete single log |
 | DELETE | `/api/v1/attendance/logs` | **[admin]** | Bulk reset for a date |
+
+### Detection Evidence
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/api/v1/detections` | JWT | Paginated detection log (recognition + unknown + spoof) |
+| GET | `/api/v1/detections/stats` | JWT | Counts by type |
+| GET | `/snapshots/{path}` | — | Serve captured face snapshot image |
 
 ### Employees
 | Method | Path | Auth | Description |
@@ -295,7 +302,7 @@ cameras:
 | PATCH | `/api/v1/shifts/{id}` | **[hr]** | Update shift |
 | DELETE | `/api/v1/shifts/{id}` | **[hr]** | Deactivate shift |
 | GET | `/api/v1/shifts/assignments` | JWT | List employee assignments |
-| POST | `/api/v1/shifts/assignments` | **[hr]** | Assign shift to employee |
+| POST | `/api/v1/shifts/assignments` | **[hr]** | Assign shift |
 | DELETE | `/api/v1/shifts/assignments/{emp_id}` | **[hr]** | Remove assignment |
 
 ### Cameras
@@ -315,36 +322,21 @@ cameras:
 | POST | `/api/v1/alerts/{id}/acknowledge` | **[security]** | Acknowledge |
 | GET | `/api/v1/alerts/config` | **[admin]** | Get thresholds |
 | POST | `/api/v1/alerts/config/update` | **[admin]** | Update thresholds |
-| POST | `/api/v1/alerts/config/password` | **[admin]** | Change config password |
 
 ### Analytics & Reports
 | Method | Path | Auth | Description |
 |---|---|---|---|
 | GET | `/api/v1/analytics/occupancy` | JWT | Live occupancy |
-| GET | `/api/v1/analytics/hourly` | JWT | Hourly entry/exit chart data |
+| GET | `/api/v1/analytics/hourly` | JWT | Hourly entry/exit chart |
 | GET | `/api/v1/analytics/shift-compliance` | JWT | On-time % per employee |
 | GET | `/api/v1/analytics/visitors` | JWT | Unknown person count |
-| GET | `/api/v1/analytics/department-occupancy` | JWT | Occupancy by department |
 | GET | `/api/v1/reports/monthly.csv` | JWT | CSV export |
-
-### Admin (User Management)
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/api/v1/admin/users` | **[admin]** | List users |
-| POST | `/api/v1/admin/users` | **[admin]** | Create user |
-| PATCH | `/api/v1/admin/users/{id}` | **[admin]** | Change role / status |
-| DELETE | `/api/v1/admin/users/{id}` | **[admin]** | Deactivate user |
-
-### RBAC / Audit
-| Method | Path | Auth | Description |
-|---|---|---|---|
-| GET | `/api/v1/rbac/audit` | **[admin]** | Audit logs |
-| GET | `/api/v1/rbac/audit/stats` | **[admin]** | Audit statistics |
 
 ### WebSocket
 | Path | Auth | Description |
 |---|---|---|
-| `WS /ws/attendance/{tenant_id}?token=...` | JWT (query) | Real-time events |
+| `WS /ws/attendance/{tenant_id}?token=...` | JWT (query) | Real-time check-in/out events |
+| `WS /ws/alerts/{tenant_id}?token=...` | JWT (query) | Real-time security alerts |
 
 ---
 
@@ -356,7 +348,7 @@ cameras:
 - [ ] `ENVIRONMENT=production`
 - [ ] Default admin password changed immediately after first login
 - [ ] Postgres and Redis not exposed on public interfaces
-- [ ] Nginx configured with SSL (see certbot instructions in `deploy.sh` output)
+- [ ] Nginx configured with SSL
 - [ ] Prometheus `/metrics` firewalled to internal network only
 
 ---
@@ -368,93 +360,107 @@ smart-ai-attendance/
 ├── backend/
 │   ├── app/
 │   │   ├── api/v1/          auth, attendance, employees, shifts, cameras,
-│   │   │                    alerts, analytics, reports, enrollment, admin, rbac, ws
+│   │   │                    alerts, analytics, reports, enrollment, admin,
+│   │   │                    rbac, ws (attendance + alerts WebSocket), detections
 │   │   ├── core/            security (JWT/bcrypt/RBAC), middleware, exceptions
-│   │   ├── models/          SQLAlchemy ORM (User, Employee, Shift, Camera, Alert, ...)
+│   │   ├── models/          SQLAlchemy ORM (User, Employee, Shift, Camera, Alert,
+│   │   │                    AttendanceLog, RecognitionEvent, UnknownDetection)
 │   │   ├── schemas/         Pydantic I/O schemas
 │   │   ├── services/        AttendanceService, AlertService, FaceEnrollmentService
 │   │   └── workers/         Celery tasks (mark absentees, retention, digest)
-│   ├── Dockerfile            Production (pre-baked InsightFace models)
-│   ├── Dockerfile.dev        Fast dev (models download on first use)
+│   ├── Dockerfile
+│   ├── Dockerfile.dev
 │   └── seed.py
 │
 ├── edge/
 │   ├── src/
-│   │   ├── utils/gpu.py      Runtime GPU auto-detection (NVIDIA/AMD/Intel/CPU)
-│   │   ├── detection/        YOLOv11 + ByteTrack person detector
-│   │   ├── recognition/      ArcFace embedder, anti-spoof, FAISS search
-│   │   ├── camera/           RTSP reader, MJPEG server
-│   │   └── pipeline/         FrameProcessor, EventPublisher
-│   ├── Dockerfile.edge.nvidia   NVIDIA CUDA
-│   ├── Dockerfile.edge.amd      AMD ROCm
-│   ├── Dockerfile.edge.intel    Intel OpenVINO
-│   └── Dockerfile.edge.cpu      CPU only
+│   │   ├── utils/gpu.py        Runtime GPU auto-detection
+│   │   ├── detection/          YOLOv11 + ByteTrack person detector
+│   │   ├── recognition/
+│   │   │   ├── arcface.py      InsightFace ArcFace R100 (det_size=960)
+│   │   │   ├── anti_spoof.py   MiniFASNet ONNX model (CelebA-Spoof) + heuristic fallback
+│   │   │   └── faiss_search.py Top-K cosine similarity with per-employee mean aggregation
+│   │   ├── camera/             RTSP reader, MJPEG server
+│   │   └── pipeline/
+│   │       ├── frame_processor.py  Multi-frame voting engine, face-quality gating
+│   │       └── event_publisher.py  Redis pub/sub + backend POST for all event types
+│   ├── config/camera_config.yaml   Tunable thresholds (no rebuild needed)
+│   ├── weights/antispoof_128.onnx  MiniFASNet anti-spoof model
+│   ├── Dockerfile.edge             NVIDIA CUDA (primary)
+│   ├── Dockerfile.edge.amd         AMD ROCm
+│   ├── Dockerfile.edge.intel       Intel OpenVINO
+│   └── Dockerfile.edge.cpu         CPU only
 │
 ├── frontend/
 │   ├── src/
-│   │   ├── app/             Next.js app router pages
-│   │   ├── components/      DashboardShell, CameraFeed, charts, live feeds
-│   │   ├── lib/             api.ts, auth.ts, rbac.ts (hasRole/useRole)
-│   │   └── types/           TypeScript interfaces
+│   │   ├── app/
+│   │   │   └── dashboard/
+│   │   │       ├── page.tsx            Overview (stats, cameras, live feed, alerts)
+│   │   │       ├── detection-log/      Evidence log with snapshots
+│   │   │       ├── employees/          Employee management + enrollment
+│   │   │       ├── cameras/            Camera management + live streams
+│   │   │       ├── alerts/             Alert list + acknowledge
+│   │   │       ├── security-alerts/    High-severity incident log
+│   │   │       ├── shifts/             Shift management + assignments
+│   │   │       ├── analytics/          Charts + compliance
+│   │   │       ├── reports/            CSV export
+│   │   │       └── admin/              User management
+│   │   ├── components/
+│   │   │   ├── live/
+│   │   │   │   ├── LiveEventFeed.tsx   Real-time events (check-in, unknown, spoof)
+│   │   │   │   ├── AlertsFeed.tsx      Real-time alerts via WebSocket
+│   │   │   │   ├── CameraFeed.tsx      Live MJPEG stream display
+│   │   │   │   └── OccupancyCards.tsx  Zone occupancy
+│   │   │   └── ui/DashboardShell.tsx   Sidebar + nav
+│   │   ├── lib/
+│   │   │   ├── api.ts              All API calls
+│   │   │   ├── websocket.ts        connectAttendanceWS + connectAlertsWS
+│   │   │   └── auth.ts / rbac.ts   Session + role helpers
+│   │   └── types/index.ts          TypeScript interfaces
 │   └── Dockerfile
 │
-├── infra/nginx/nginx.conf    Docker DNS resolver, variable upstreams
-├── docs/                     user_manual.pdf, developer_guide.pdf
-│
-├── deploy.sh                 Linux/Mac production one-click
-├── deploy.bat                Windows Server production one-click
-├── start.sh / start.bat      Local dev one-click
-├── docker-compose.prod.yml   Production (CPU edge)
-├── docker-compose.prod.gpu.yml    NVIDIA override
-├── docker-compose.prod.amd.yml    AMD override
-├── docker-compose.prod.intel.yml  Intel override
-└── docker-compose.dev.yml    Development
-```
-
----
-
-## Documents
-
-| File | Description |
-|---|---|
-| `docs/user_manual.pdf` | End-user guide: dashboard, employees, shifts, alerts |
-| `docs/developer_guide.pdf` | A-Z file guide: every file explained with logic and changes |
-| `DEVELOPER_NOTES.md` | Architecture decisions, bug-fix log, extension guide |
-
-Generate PDFs (requires `pip install fpdf2`):
-```bash
-python generate_user_manual_pdf.py
-python generate_developer_guide_pdf.py
+├── infra/nginx/nginx.conf    Proxies /api/, /ws/, /stream/, /snapshots/ → backend
+├── start.bat / stop.bat      Windows one-click start/stop (no rebuild after first run)
+├── deploy.bat                Windows production deploy (GPU auto-detect + secrets gen)
+├── docker-compose.yml        Main compose (nginx on :8080, CUDA edge)
+├── docker-compose.dev.yml    Original dev compose (nginx on :80, CPU edge)
+└── docker-compose.prod.yml   Production compose
 ```
 
 ---
 
 ## Troubleshooting
 
-**"Invalid credentials" on login**
-- Check if the backend rate limiter blocked you (too many attempts in 1 min)
-- Verify the seed ran: `docker compose logs backend | grep Seeded`
+**"Could not reach the server" on login**
+- Ensure `NEXT_PUBLIC_API_URL=http://localhost:8080` in `.env`
+- Rebuild frontend: `docker compose up -d --build frontend`
 
-**Edge node rejected (401)**
-- Confirm `EDGE_TOKEN` matches in `.env` and edge node environment
-- In dev, leave `EDGE_TOKEN` empty to skip the check
+**Employees detected as unknown**
+- Check edge logs: `docker compose logs edge_node | grep -E "sim=|best_sim"`
+- If `best_sim` is around 0.4–0.5: lower `recognition_threshold` to 0.45 in `camera_config.yaml`
+- Re-enroll employees with 3–5 photos taken under the same lighting as the camera
 
-**Dark mode not switching**
-- Tailwind requires `darkMode: "class"` (already set)
-- ThemeContext writes `dark`/`light` to `<html>` — check browser DevTools
+**Anti-spoof triggering on real people**
+- Lower `liveness_threshold` in `camera_config.yaml` (try 0.45)
+- Check edge logs for `spoof_score` values
 
-**Face recognition not working**
-- Check `CONFIDENCE_THRESHOLD` (default 0.75 dev, 0.82 prod)
-- FAISS index empty? Enroll employees first
-- Edge node logs: `docker compose logs edge_node`
+**Face detection failing ("no face detected in crop")**
+- Person may be too far or turned sideways
+- Check that the camera angle shows faces clearly
 
-**GPU not detected**
-- NVIDIA: confirm nvidia-container-toolkit installed
-- AMD: confirm `/dev/kfd` exists and user is in `render` group
-- Intel: confirm `/dev/dri` exists
-- Run `./deploy.sh --gpu cpu` as a fallback
+**Port 80 conflict on Windows**
+- Docker Desktop uses port 80 internally — use port 8080 instead (already configured)
 
-**App refuses to start in production**
-- `docker compose logs backend` — startup prints which secrets are still at defaults
+**GPU not used by edge node**
+- Set `DEVICE=cuda` in `.env` and restart: `docker compose restart edge_node`
+- Verify: `docker compose logs edge_node | grep CUDAExecution`
 
-See `DEVELOPER_NOTES.md` for architecture details and extension guide.
+**App slow / edge node high CPU**
+- Confirm `DEVICE=cuda` — CPU inference is 10–20× slower
+- Check: `nvidia-smi` to see GPU memory usage
+
+**Alerts not appearing in real-time**
+- Both attendance and alerts use WebSocket — check browser console for WS connection errors
+- Confirm nginx `/ws/` proxy is configured (already set in `infra/nginx/nginx.conf`)
+
+See `DEVELOPER_NOTES.md` for architecture decisions and extension guide.

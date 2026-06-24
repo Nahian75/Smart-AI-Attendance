@@ -1,14 +1,16 @@
 """FastAPI application factory."""
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 import redis.asyncio as aioredis
 from prometheus_client import make_asgi_app
 
 from .config import settings
 from .core.middleware import TenantMiddleware, RateLimitMiddleware
-from .api.v1 import auth, attendance, employees, enrollment, cameras, reports, ws, alerts, analytics, rbac, admin, shifts
+from .api.v1 import auth, attendance, employees, enrollment, cameras, reports, ws, alerts, analytics, rbac, admin, shifts, detections
 
 logger = logging.getLogger(__name__)
 
@@ -61,11 +63,17 @@ app.include_router(alerts.router,      prefix="/api/v1/alerts",      tags=["aler
 app.include_router(analytics.router,   prefix="/api/v1/analytics",   tags=["analytics"])
 app.include_router(rbac.router,        prefix="/api/v1/rbac",        tags=["rbac"])
 app.include_router(admin.router,       prefix="/api/v1/admin/users",  tags=["admin"])
-app.include_router(shifts.router,      prefix="/api/v1/shifts",        tags=["shifts"])
+app.include_router(shifts.router,      prefix="/api/v1/shifts",       tags=["shifts"])
+app.include_router(detections.router,  prefix="/api/v1/detections",   tags=["detections"])
 # WebSocket
-app.include_router(ws.router,          prefix="/ws",                 tags=["websocket"])
+app.include_router(ws.router,          prefix="/ws",                  tags=["websocket"])
 
 app.mount("/metrics", make_asgi_app())
+
+# Serve face snapshots — lets the frontend display captured images directly
+_snap_dir = settings.SNAPSHOT_DIR
+if os.path.exists(_snap_dir):
+    app.mount("/snapshots", StaticFiles(directory=_snap_dir), name="snapshots")
 
 
 @app.get("/health", tags=["system"])

@@ -7,10 +7,10 @@ echo   Smart AI Attendance System - Stopping
 echo  ================================================
 echo.
 
-docker compose -f docker-compose.dev.yml down
+docker compose down
 
 echo.
-echo  Stopped. All data is preserved in Docker volumes.
+echo  Stopped. All data is preserved.
 echo  Run start.bat to start again.
 echo.
 pause

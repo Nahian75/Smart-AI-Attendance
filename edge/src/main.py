@@ -7,7 +7,7 @@ import numpy as np
 import httpx
 
 from .detection.yolo_detector import YOLODetector
-from .recognition.arcface import ArcFaceRecognizer
+from .recognition.arcface import ArcFaceRecognizer, probe_camera_resolution, auto_det_size
 from .recognition.anti_spoof import AntiSpoofChecker
 from .recognition.faiss_search import FaissSearch
 from .camera.rtsp_reader import RTSPReader
@@ -182,7 +182,7 @@ def _start_reader(cam: dict, processor: FrameProcessor, cfg: dict,
 
     reader = RTSPReader(
         cam["id"], cam["rtsp_url"],
-        fps_target=cam.get("fps_target", 10),
+        fps_target=cam.get("fps_target") or cfg.get("fps_target", 6),
         use_gstreamer=cfg.get("use_gstreamer", False),
     )
     reader.start(make_cb(processor))
@@ -194,7 +194,7 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
                              readers: dict, processors: dict,
                              cfg: dict, mjpeg: MJPEGServer,
                              publisher: EventPublisher,
-                             detector: YOLODetector, recognizer: ArcFaceRecognizer,
+                             make_detector, recognizer: ArcFaceRecognizer,
                              anti_spoof: AntiSpoofChecker, face_search: FaissSearch,
                              id_to_name: dict, snapshot_dir: str,
                              loop: asyncio.AbstractEventLoop,
@@ -217,13 +217,13 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
                     proc = processors[cam_id]
                     readers[cam_id] = _start_reader(new_cam, proc, cfg, loop)
 
-            # Start brand-new cameras
+            # Start brand-new cameras — each gets its own YOLODetector
             for cam_id, cam in new_map.items():
                 if cam_id not in readers:
                     log.info(f"New camera detected: {cam_id}")
                     proc = FrameProcessor(
                         camera_id=cam_id, direction=cam.get("direction", "entrance"),
-                        config=cfg, detector=detector, recognizer=recognizer,
+                        config=cfg, detector=make_detector(), recognizer=recognizer,
                         anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
                         snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
                     )
@@ -235,6 +235,14 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
 
 
 async def main():
+    # Force RTSP over TCP for all OpenCV VideoCapture connections.
+    # UDP (default) drops packets silently on WiFi, causing read failures and
+    # H.265 decode errors ("Could not find ref with POC").
+    os.environ.setdefault(
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        "rtsp_transport;tcp|analyzeduration;2000000|probesize;2000000"
+    )
+
     cfg = load_config(os.getenv("CAMERA_CONFIG", "config/camera_config.yaml"))
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
     backend_url = os.getenv("BACKEND_URL", "http://localhost:8000")
@@ -246,28 +254,10 @@ async def main():
         log.error(f"Backend unreachable after 3 minutes at {backend_url}. Exiting.")
         return
 
-    device = os.getenv("DEVICE", cfg.get("device", "auto"))
-    log.info(f"Loading models on device={device} ...")
-    log_gpu_info()
-    detector = YOLODetector(cfg.get("yolo_model", "yolo11s.pt"), device=device,
-                            tracker_cfg=cfg.get("tracker", "bytetrack.yaml"))
-    recognizer = ArcFaceRecognizer(device=device)
-    anti_spoof = AntiSpoofChecker(cfg.get("antispoof_model"))
-
+    # ── Load cameras first so we can probe resolution before loading models ──
     token = await get_token(backend_url)
-    token_ref = [token]  # Mutable container so loops can refresh
+    token_ref = [token]
     embs, ids, id_to_name = await load_embeddings(backend_url, tenant_id, token)
-    face_search = FaissSearch(threshold=cfg.get("recognition_threshold", 0.82))
-    if len(ids):
-        face_search.build(embs, ids)
-
-    if len(ids) == 0:
-        log.warning(
-            "FAISS index is EMPTY — no enrolled faces loaded. "
-            "Enroll employees via the dashboard, then restart the edge node."
-        )
-    else:
-        log.info(f"FAISS index ready: {len(ids)} face embedding(s) for recognition.")
 
     cameras = await load_cameras(backend_url, token, cfg.get("cameras", []))
     if not cameras:
@@ -280,6 +270,66 @@ async def main():
             await ensure_token(backend_url, token_ref)
             cameras = await load_cameras(backend_url, token_ref[0], cfg.get("cameras", []))
         log.info(f"Cameras loaded: {len(cameras)}")
+
+    # ── Auto-select det_size from actual camera resolution ────────────────────
+    # Config `det_size` overrides auto-detection if set explicitly.
+    _det_size = (640, 640)
+    _cfg_det = cfg.get("det_size")
+    if _cfg_det:
+        _det_size = (int(_cfg_det), int(_cfg_det))
+        log.info(f"det_size set by config: {_det_size[0]}×{_det_size[1]}")
+    else:
+        _rtsp = cameras[0].get("rtsp_url", "") if cameras else ""
+        if _rtsp:
+            log.info("Probing camera resolution to auto-select det_size ...")
+            _res = probe_camera_resolution(_rtsp)
+            if _res:
+                _det_size = auto_det_size(*_res)
+                log.info(
+                    f"Camera: {_res[0]}×{_res[1]} → det_size auto-selected: "
+                    f"{_det_size[0]}×{_det_size[1]}"
+                )
+            else:
+                log.warning("Could not probe camera resolution — using det_size=640×640")
+        else:
+            log.info("No camera URL available for probe — using det_size=640×640")
+
+    # ── Load AI models ────────────────────────────────────────────────────────
+    device = os.getenv("DEVICE", cfg.get("device", "auto"))
+    log.info(f"Loading models on device={device} ...")
+    log_gpu_info()
+    # NOTE: YOLODetector is intentionally NOT shared across cameras.
+    # ByteTrack maintains per-instance tracker state (track IDs, Kalman filters).
+    # If one model is shared, alternating frames from cam1/cam2 corrupt the tracker
+    # state causing tracks to never confirm (shows tracks=0 on secondary cameras).
+    # Each camera gets its own YOLODetector — weights are cached by PyTorch so VRAM
+    # usage is only marginally higher (~50MB extra per additional camera).
+    _yolo_model = cfg.get("yolo_model", "yolo11s.pt")
+    _tracker_cfg = cfg.get("tracker", "bytetrack.yaml")
+
+    def _make_detector() -> YOLODetector:
+        return YOLODetector(_yolo_model, device=device, tracker_cfg=_tracker_cfg)
+
+    recognizer = ArcFaceRecognizer(device=device, det_size=_det_size)
+    anti_spoof = AntiSpoofChecker(
+        cfg.get("antispoof_model"),
+        threshold=cfg.get("liveness_threshold"),
+    )
+
+    face_search = FaissSearch(
+        threshold=cfg.get("recognition_threshold", 0.82),
+        top_k=cfg.get("faiss_top_k", 5),
+    )
+    if len(ids):
+        face_search.build(embs, ids)
+
+    if len(ids) == 0:
+        log.warning(
+            "FAISS index is EMPTY — no enrolled faces loaded. "
+            "Enroll employees via the dashboard, then restart the edge node."
+        )
+    else:
+        log.info(f"FAISS index ready: {len(ids)} face embedding(s) for recognition.")
 
     mjpeg = MJPEGServer(port=int(os.getenv("MJPEG_PORT", "8001")))
     await mjpeg.start()
@@ -294,7 +344,7 @@ async def main():
     for cam in cameras:
         proc = FrameProcessor(
             camera_id=cam["id"], direction=cam.get("direction", "entrance"),
-            config=cfg, detector=detector, recognizer=recognizer,
+            config=cfg, detector=_make_detector(), recognizer=recognizer,
             anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
             snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
         )
@@ -307,7 +357,7 @@ async def main():
             camera_watch_loop(
                 backend_url, token_ref, cfg.get("cameras", []),
                 readers, processors, cfg, mjpeg, publisher,
-                detector, recognizer, anti_spoof, face_search,
+                _make_detector, recognizer, anti_spoof, face_search,
                 id_to_name, snapshot_dir, loop,
             ),
             embedding_watch_loop(backend_url, tenant_id, token_ref, face_search, id_to_name),

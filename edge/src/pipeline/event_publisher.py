@@ -27,29 +27,31 @@ class EventPublisher:
         except Exception as e:
             log.error(f"redis publish failed: {e}")
 
-        if event.get("type") == "recognition":
+        event_type = event.get("type")
+        if event_type in ("recognition", "unknown_person", "spoof_attempt"):
             try:
+                payload = {
+                    "camera_id": event["camera_id"],
+                    "employee_id": event.get("employee_id"),
+                    "direction": event.get("direction"),
+                    "track_id": event.get("track_id"),
+                    "confidence": event.get("confidence", 0),
+                    "is_live": event.get("is_live", True),
+                    "spoof_score": event.get("spoof_score"),
+                    "snapshot_url": event.get("snapshot_url"),
+                    "embedding_dist": event.get("embedding_dist"),
+                }
                 r = await self._client.post(
                     f"{self.backend_url}/api/v1/attendance/event",
                     params={"tenant_id": self.tenant_id},
                     headers=self._headers,
-                    json={
-                        "camera_id": event["camera_id"],
-                        "employee_id": event["employee_id"],
-                        "direction": event.get("direction"),
-                        "track_id": event.get("track_id"),
-                        "confidence": event["confidence"],
-                        "is_live": event.get("is_live", True),
-                        "spoof_score": event.get("spoof_score"),
-                        "snapshot_url": event.get("snapshot_url"),
-                        "embedding_dist": event.get("embedding_dist"),
-                    },
+                    json=payload,
                 )
                 if r.status_code == 200:
                     result = r.json()
                     action = result.get("action", "?")
                     reason = result.get("reason", "")
-                    emp = event.get("employee_id", "")
+                    emp = event.get("employee_id", "unknown")
                     if action == "skip":
                         log.warning(f"attendance skipped emp={emp} reason={reason} conf={event.get('confidence')}")
                     else:

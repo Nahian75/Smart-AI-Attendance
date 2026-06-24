@@ -22,6 +22,10 @@ celery_app.conf.update(
             "task": "app.workers.tasks.apply_retention",
             "schedule": crontab(hour=2, minute=0),
         },
+        "purge-snapshots-nightly": {
+            "task": "app.workers.tasks.purge_snapshots",
+            "schedule": crontab(hour=3, minute=0),
+        },
         "email-daily-digest": {
             "task": "app.workers.tasks.email_digest",
             "schedule": crontab(hour=18, minute=0),

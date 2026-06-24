@@ -1,4 +1,5 @@
 ultralytics==8.3.55          # YOLOv11 + built-in ByteTrack/BoT-SORT
+lap==0.5.13                  # ByteTrack linear assignment — pre-install to stop YOLO auto-downloading it every startup
 insightface==0.7.3           # ArcFace R100 + SCRFD face detector
 onnxruntime-gpu==1.20.1
 faiss-cpu==1.9.0             # swap for faiss-gpu on CUDA hosts

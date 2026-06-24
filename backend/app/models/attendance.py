@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, date
-from sqlalchemy import String, Boolean, Integer, DateTime, Date, Numeric, Text, JSON, ForeignKey
+from sqlalchemy import String, Boolean, Integer, DateTime, Date, Numeric, Text, JSON, ForeignKey, Index
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column
 from ..db.base import Base
@@ -10,6 +10,9 @@ from ._mixins import UUIDMixin, TimestampMixin
 class RecognitionEvent(UUIDMixin, TimestampMixin, Base):
     """Raw event from edge AI node — before attendance logic is applied."""
     __tablename__ = "recognition_events"
+    __table_args__ = (
+        Index("ix_recog_tenant_created", "tenant_id", "created_at"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
     camera_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id"), nullable=True)
@@ -25,6 +28,9 @@ class RecognitionEvent(UUIDMixin, TimestampMixin, Base):
 
 class AttendanceLog(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "attendance_logs"
+    __table_args__ = (
+        Index("ix_attlog_tenant_date", "tenant_id", "attendance_date"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
     employee_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("employees.id"))
@@ -53,6 +59,9 @@ class AttendanceLog(UUIDMixin, TimestampMixin, Base):
 # PRD §5.3: all security alert types
 class Alert(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "alerts"
+    __table_args__ = (
+        Index("ix_alerts_tenant_created", "tenant_id", "created_at"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
     # Types: intruder | blacklist | after_hours | restricted_area | vip | loitering | spoof_attempt | unknown_person
@@ -71,6 +80,9 @@ class Alert(UUIDMixin, TimestampMixin, Base):
 # PRD §5.2: unknown/visitor detections that don't match any enrolled face
 class UnknownDetection(UUIDMixin, TimestampMixin, Base):
     __tablename__ = "unknown_detections"
+    __table_args__ = (
+        Index("ix_unknown_tenant_created", "tenant_id", "created_at"),
+    )
 
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"))
     camera_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("cameras.id"), nullable=True)

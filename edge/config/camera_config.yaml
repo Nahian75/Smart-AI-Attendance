@@ -1,18 +1,33 @@
 tenant_id: demo
-# ── Device ──────────────────────────────────────────────────────────────────
-# "auto"  → uses NVIDIA GPU if available, otherwise CPU (recommended)
-# "cuda"  → force NVIDIA GPU
-# "cpu"   → force CPU (works on any machine, ~2-5 fps per camera)
-device: auto
-use_gstreamer: false          # set true on NVIDIA Jetson for HW decode
-yolo_model: yolo11s.pt        # yolo11n.pt for Jetson, yolo11m.pt for accuracy
-tracker: bytetrack.yaml       # or botsort.yaml
-antispoof_model: ~   # set to weights/antispoof.onnx when you have the model; ~ = pass-through (always live)
 
-# PRD §6.3: all thresholds tunable per deployment
-recognition_threshold: 0.50   # lower for testing; raise to 0.82 for production
-liveness_threshold: 0.80      # PRD §6.3: 0.80
-cooldown_seconds: 10          # 10 sec for testing; raise to 300 for production
+# ── Device ───────────────────────────────────────────────────────────────────
+device: auto              # auto = GPU if available, else CPU
+use_gstreamer: false      # true only on NVIDIA Jetson with HW decoder
+yolo_model: yolo11s.pt   # s = best speed/accuracy for RTX 3050
+tracker: bytetrack.yaml
+antispoof_model: weights/antispoof_128.onnx
+
+# ── Recognition thresholds (tuned for V380 / budget WiFi cameras) ────────────
+# Heavy H.264/H.265 compression on budget cameras reduces ArcFace similarity
+# scores by ~15–20% vs. good IP cameras. Thresholds set accordingly.
+recognition_threshold: 0.42   # raise to 0.55+ when using quality cameras
+liveness_threshold: 0.45      # budget cameras blur faces → lower liveness scores
+
+# ── Face enhancement (V380 / HiVideo compensation) ───────────────────────────
+# Bilateral denoise + unsharp mask + CLAHE before ArcFace embedding.
+# Recovers detail destroyed by heavy H.264 compression. +5–15% similarity.
+# Disable (false) if using quality cameras — unnecessary overhead.
+enhance_faces: true
+
+# ── Multi-frame voting ────────────────────────────────────────────────────────
+min_det_score: 0.48      # relaxed — budget cameras produce lower face det_scores
+vote_window: 5           # collect 5 frames max per person
+min_votes: 3             # decide after 3 good frames (~0.5s at 6fps)
+vote_ttl_seconds: 3      # clear stale vote buffer after 3s of no sighting
+cooldown_seconds: 300    # 5 min between re-detections of same person
+
+# ── Stream settings ───────────────────────────────────────────────────────────
+fps_target: 6            # 6fps is enough for recognition, saves GPU vs 10fps
 
 # Cameras are loaded from the backend database (registered via the dashboard).
 # Add cameras using the Cameras page in the web UI — no hardcoding needed here.

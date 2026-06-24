@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict
 
 class RecognitionEventIn(BaseModel):
     camera_id: uuid.UUID
-    employee_id: uuid.UUID
+    employee_id: uuid.UUID | None = None
     direction: str | None = None
     track_id: int | None = None
     confidence: float

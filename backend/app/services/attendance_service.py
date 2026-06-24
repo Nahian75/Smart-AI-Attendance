@@ -48,6 +48,7 @@ class AttendanceService:
                 camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
             )
             await self._store_event(event, tenant_id)
+            await self.db.commit()
             return {"action": "skip", "reason": "spoof_detected"}
 
         # Restricted-area check (PRD §5.3): fires even if unknown
@@ -60,11 +61,16 @@ class AttendanceService:
             )
 
         # PRD §6.3: confidence gate → unknown person path
-        if conf < settings.CONFIDENCE_THRESHOLD:
-            logger.warning("low_confidence cam=%s conf=%.3f threshold=%.2f — skipped (raise recognition_threshold in camera_config.yaml or lower CONFIDENCE_THRESHOLD in .env)",
-                           camera_id, conf, settings.CONFIDENCE_THRESHOLD)
+        # Also catches unknown_person events from edge (employee_id is None)
+        if not event.get("employee_id") or conf < settings.CONFIDENCE_THRESHOLD:
+            if not event.get("employee_id"):
+                logger.warning("unknown_person cam=%s conf=%.3f — no employee matched", camera_id, conf)
+            else:
+                logger.warning("low_confidence cam=%s conf=%.3f threshold=%.2f — skipped",
+                               camera_id, conf, settings.CONFIDENCE_THRESHOLD)
             await self._handle_unknown(event, tenant_id, cam)
-            return {"action": "skip", "reason": "low_confidence", "confidence": conf}
+            await self.db.commit()
+            return {"action": "skip", "reason": "unknown_person", "confidence": conf}
 
         emp_id = uuid.UUID(str(event["employee_id"]))
         employee = await self.db.get(Employee, emp_id)
@@ -232,13 +238,22 @@ class AttendanceService:
         self.db.add(ud)
         await self.db.flush()
 
-        # PRD §5.3: intruder alert if outside business hours (simple 08:00–20:00 heuristic)
+        cam_name = cam.name if cam else "camera"
+
+        # Always fire unknown_person alert so dashboard shows it immediately
+        await self.alerts.fire(
+            tenant_id, "unknown_person",
+            f"Unknown person detected on {cam_name}",
+            camera_id=cam_uuid,
+            snapshot_url=event.get("snapshot_url"),
+        )
+
+        # PRD §5.3: escalate to intruder alert if outside business hours (07:00–20:00 UTC)
         hour = datetime.now(timezone.utc).hour
-        is_after_hours = hour < 7 or hour >= 20
-        if is_after_hours:
+        if hour < 7 or hour >= 20:
             await self.alerts.fire(
                 tenant_id, "intruder",
-                f"Unknown person detected outside business hours on {cam.name if cam else 'camera'}",
+                f"Unknown person detected outside business hours on {cam_name}",
                 camera_id=cam_uuid,
                 snapshot_url=event.get("snapshot_url"),
             )
@@ -267,8 +282,11 @@ class AttendanceService:
             .where(
                 EmployeeShift.employee_id == emp_id,
                 EmployeeShift.effective_from <= day,
-                (EmployeeShift.effective_to.is_(None)) | (EmployeeShift.effective_to >= day),
-            ).limit(1)
+                (EmployeeShift.effective_to.is_(None)) | (EmployeeShift.effective_to > day),
+                Shift.is_active.is_(True),
+            )
+            .order_by(EmployeeShift.effective_from.desc())
+            .limit(1)
         )
         return (await self.db.execute(stmt)).scalar_one_or_none()
 

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import {
   ScanEye, BarChart3, Users, Video, ShieldAlert, LogOut,
-  TrendingUp, FileText, KeyRound, X, Eye, EyeOff, Settings, Clock,
+  TrendingUp, FileText, KeyRound, X, Eye, EyeOff, Settings, Clock, Film,
 } from "lucide-react";
 import { clearSession } from "@/lib/auth";
 import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/rbac";
@@ -14,6 +14,7 @@ const NAV = [
   { label: "Overview",        icon: BarChart3,   href: "/dashboard" },
   { label: "Employees",       icon: Users,        href: "/dashboard/employees" },
   { label: "Cameras",         icon: Video,        href: "/dashboard/cameras" },
+  { label: "Detection Log",   icon: Film,         href: "/dashboard/detection-log" },
   { label: "Alerts",          icon: ShieldAlert,  href: "/dashboard/alerts" },
   { label: "Security Alerts", icon: ShieldAlert,  href: "/dashboard/security-alerts" },
   { label: "Analytics",       icon: TrendingUp,   href: "/dashboard/analytics" },

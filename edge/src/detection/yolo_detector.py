@@ -44,7 +44,7 @@ class YOLODetector:
         results = self.model.track(
             frame, persist=True, classes=[self.PERSON_CLASS],
             conf=self.conf, iou=self.iou, tracker=self.tracker_cfg,
-            device=self.device, verbose=False,
+            device=self.device, verbose=False, stream=False,
         )
         out: list[Track] = []
         if not results:

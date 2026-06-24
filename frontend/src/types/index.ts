@@ -24,18 +24,25 @@ export interface AttendanceSummary {
 }
 
 export interface LiveEvent {
-  action: "check_in" | "check_out" | "skip";
-  employee_id: string;
-  employee_name: string;
-  department: string | null;
-  timestamp: string;
-  confidence: number;
-  camera_id: string;
-  status: string;
-  is_late: boolean;
-  late_by_min: number;
-  overtime_seconds: number;
-  snapshot_url: string | null;
+  // Backend processed event fields
+  action?: "check_in" | "check_out" | "skip";
+  employee_id?: string | null;
+  employee_name?: string | null;
+  department?: string | null;
+  status?: string;
+  is_late?: boolean;
+  late_by_min?: number;
+  overtime_seconds?: number;
+  // Raw edge event fields
+  type?: string;
+  camera_id?: string | null;
+  track_id?: number | null;
+  confidence?: number | null;
+  spoof_score?: number | null;
+  is_live?: boolean;
+  snapshot_url?: string | null;
+  // Shared
+  timestamp?: string | number | null;
 }
 
 export interface Employee {

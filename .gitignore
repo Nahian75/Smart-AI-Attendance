@@ -8,3 +8,4 @@ edge/models/weights/
 snapshots/
 *.engine
 *.trt
+edge/weights/*.onnx
