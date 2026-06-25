@@ -9,6 +9,7 @@ import httpx
 from .detection.yolo_detector import YOLODetector
 from .recognition.arcface import ArcFaceRecognizer, probe_camera_resolution, auto_det_size
 from .recognition.anti_spoof import AntiSpoofChecker
+from .recognition.mask_detector import MaskDetector
 from .recognition.faiss_search import FaissSearch
 from .camera.rtsp_reader import RTSPReader
 from .camera.mjpeg_server import MJPEGServer
@@ -226,6 +227,7 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
                         config=cfg, detector=make_detector(), recognizer=recognizer,
                         anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
                         snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
+                        mask_detector=mask_detector,
                     )
                     processors[cam_id] = proc
                     readers[cam_id] = _start_reader(cam, proc, cfg, loop)
@@ -235,13 +237,10 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
 
 
 async def main():
-    # Force RTSP over TCP for all OpenCV VideoCapture connections.
-    # UDP (default) drops packets silently on WiFi, causing read failures and
-    # H.265 decode errors ("Could not find ref with POC").
-    os.environ.setdefault(
-        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
-        "rtsp_transport;tcp|analyzeduration;2000000|probesize;2000000"
-    )
+    # OPENCV_FFMPEG_CAPTURE_OPTIONS is set per-connection in RTSPReader._connect()
+    # with low-latency flags (nobuffer, low_delay). Do not set a default here
+    # as it would be overridden anyway and the high analyzeduration/probesize
+    # values (2000000) caused long stream-open times and added to buffer delay.
 
     cfg = load_config(os.getenv("CAMERA_CONFIG", "config/camera_config.yaml"))
     redis_url = os.getenv("REDIS_URL", "redis://localhost:6379/0")
@@ -315,6 +314,10 @@ async def main():
         cfg.get("antispoof_model"),
         threshold=cfg.get("liveness_threshold"),
     )
+    mask_detector = MaskDetector(
+        cfg.get("mask_model"),
+        threshold=cfg.get("mask_threshold"),
+    )
 
     face_search = FaissSearch(
         threshold=cfg.get("recognition_threshold", 0.82),
@@ -347,6 +350,7 @@ async def main():
             config=cfg, detector=_make_detector(), recognizer=recognizer,
             anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
             snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
+            mask_detector=mask_detector,
         )
         processors[cam["id"]] = proc
         readers[cam["id"]] = _start_reader(cam, proc, cfg, loop)
