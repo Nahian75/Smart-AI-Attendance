@@ -42,7 +42,7 @@ class MJPEGServer:
                     await resp.write(_FRAME_HDR + frame + _FRAME_END)
                     prev = frame
                 else:
-                    await asyncio.sleep(0.02)
+                    await asyncio.sleep(0.005)
         except (ConnectionResetError, BrokenPipeError, asyncio.CancelledError):
             pass
         return resp

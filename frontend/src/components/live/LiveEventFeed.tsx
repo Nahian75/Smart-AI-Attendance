@@ -18,6 +18,14 @@ function eventLabel(e: LiveEvent): { label: string; sub: string; color: string }
         : "bg-green-50 dark:bg-green-900/30 text-green-700 dark:text-green-400",
     };
   }
+  // Raw edge recognition (before backend confirms check_in/check_out)
+  if (e.type === "recognition") {
+    return {
+      label: e.employee_name || e.employee_id || "Employee",
+      sub: `Detected · conf ${Math.round((e.confidence ?? 0) * 100)}%`,
+      color: "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-400",
+    };
+  }
   // Raw edge event — unknown person
   if (e.type === "unknown_person") {
     return {
@@ -52,11 +60,13 @@ export default function LiveEventFeed() {
     api.liveFeed().then(setEvents).catch(() => {});
 
     const handle = connectAttendanceWS(s.tenantId, s.token, (e) => {
-      // Skip "skip" actions (cooldown / duplicate) and pings
       if (e.type === "ping") return;
       if (e.action === "skip") return;
-      // Accept: check_in / check_out (backend processed) OR unknown_person / spoof_attempt (raw edge)
-      if (!e.action && e.type !== "unknown_person" && e.type !== "spoof_attempt") return;
+      // Accept backend-processed events (check_in / check_out) and all raw edge
+      // events (recognition, unknown_person, spoof_attempt) so the feed updates
+      // immediately on detection without waiting for the DB round-trip.
+      const RAW_TYPES = new Set(["recognition", "unknown_person", "spoof_attempt"]);
+      if (!e.action && !RAW_TYPES.has(e.type ?? "")) return;
       setEvents((prev) => [e, ...prev].slice(0, 50));
     });
 

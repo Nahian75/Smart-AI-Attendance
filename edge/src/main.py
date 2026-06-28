@@ -12,6 +12,7 @@ from .recognition.anti_spoof import AntiSpoofChecker
 from .recognition.mask_detector import MaskDetector
 from .recognition.faiss_search import FaissSearch
 from .camera.rtsp_reader import RTSPReader
+from .camera.universal_reader import UniversalCameraReader
 from .camera.mjpeg_server import MJPEGServer
 from .pipeline.frame_processor import FrameProcessor
 from .pipeline.event_publisher import EventPublisher
@@ -174,16 +175,45 @@ async def embedding_watch_loop(backend_url: str, tenant_id: str, token_ref: list
             log.warning(f"Embedding resync error: {e}")
 
 
+def _camera_cfg(cam: dict, global_cfg: dict) -> dict:
+    """Return a config dict for one camera, merging per-camera profile overrides.
+
+    Profiles in camera_profiles[] are matched by checking whether any keyword
+    in their `match` list appears (case-insensitive) in the camera name or URL.
+    First matching profile wins; unmatched cameras use the global defaults.
+    """
+    cfg = dict(global_cfg)  # shallow copy so we don't mutate the global
+    name = (cam.get("name") or "").lower()
+    url  = (cam.get("rtsp_url") or "").lower()
+    for profile in global_cfg.get("camera_profiles", []):
+        keywords = [k.lower() for k in profile.get("match", [])]
+        if any(k in name or k in url for k in keywords):
+            cfg.update({k: v for k, v in profile.items() if k != "match"})
+            log.info(
+                "[%s] matched camera profile keywords=%s — "
+                "fps=%s enhance=%s superres=%s threshold=%.2f",
+                cam.get("id"), keywords,
+                cfg.get("fps_target"), cfg.get("enhance_faces"),
+                cfg.get("superres"), cfg.get("recognition_threshold", 0),
+            )
+            break
+    return cfg
+
+
 def _start_reader(cam: dict, processor: FrameProcessor, cfg: dict,
-                  loop: asyncio.AbstractEventLoop) -> RTSPReader:
+                  loop: asyncio.AbstractEventLoop) -> UniversalCameraReader:
     def make_cb(proc):
         def cb(frame, ts):
-            asyncio.run_coroutine_threadsafe(proc.process(frame, ts), loop)
+            # Always push to the MJPEG live feed from the dispatch thread.
+            proc.push_mjpeg(frame)
+            # Only schedule inference if the processor is idle.
+            if not proc._busy:
+                asyncio.run_coroutine_threadsafe(proc.process(frame, ts), loop)
         return cb
 
-    reader = RTSPReader(
+    reader = UniversalCameraReader(
         cam["id"], cam["rtsp_url"],
-        fps_target=cam.get("fps_target") or cfg.get("fps_target", 6),
+        fps_target=cam.get("fps_target") or cfg.get("fps_target", 0),
         use_gstreamer=cfg.get("use_gstreamer", False),
     )
     reader.start(make_cb(processor))
@@ -222,15 +252,16 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
             for cam_id, cam in new_map.items():
                 if cam_id not in readers:
                     log.info(f"New camera detected: {cam_id}")
+                    cam_cfg = _camera_cfg(cam, cfg)
                     proc = FrameProcessor(
                         camera_id=cam_id, direction=cam.get("direction", "entrance"),
-                        config=cfg, detector=make_detector(), recognizer=recognizer,
+                        config=cam_cfg, detector=make_detector(), recognizer=recognizer,
                         anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
                         snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
                         mask_detector=mask_detector,
                     )
                     processors[cam_id] = proc
-                    readers[cam_id] = _start_reader(cam, proc, cfg, loop)
+                    readers[cam_id] = _start_reader(cam, proc, cam_cfg, loop)
 
         except Exception as e:
             log.warning(f"Camera watch error: {e}")
@@ -341,19 +372,20 @@ async def main():
     publisher.set_token(token_ref[0])
     loop = asyncio.get_event_loop()
 
-    readers: dict[str, RTSPReader] = {}
+    readers: dict[str, UniversalCameraReader] = {}
     processors: dict[str, FrameProcessor] = {}
 
     for cam in cameras:
+        cam_cfg = _camera_cfg(cam, cfg)
         proc = FrameProcessor(
             camera_id=cam["id"], direction=cam.get("direction", "entrance"),
-            config=cfg, detector=_make_detector(), recognizer=recognizer,
+            config=cam_cfg, detector=_make_detector(), recognizer=recognizer,
             anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
             snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
             mask_detector=mask_detector,
         )
         processors[cam["id"]] = proc
-        readers[cam["id"]] = _start_reader(cam, proc, cfg, loop)
+        readers[cam["id"]] = _start_reader(cam, proc, cam_cfg, loop)
 
     try:
         await asyncio.gather(

@@ -1,0 +1,14 @@
+# Vendor SDK binaries — see sdk/*/INSTALL.txt for download instructions
+sdk/hikvision/*.so
+sdk/hikvision/HCNetSDKCom/*.so
+sdk/dahua/*.so
+
+# AI model weights — downloaded at build time
+weights/*.onnx
+weights/*.pb
+weights/*.pt
+weights/*.pth
+
+# Keep install instructions and directory structure
+!sdk/hikvision/INSTALL.txt
+!sdk/dahua/INSTALL.txt

@@ -5,7 +5,24 @@ ENV PYTHONUNBUFFERED=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 libglib2.0-0 gstreamer1.0-plugins-bad gstreamer1.0-libav \
+    # Required by PyAV (av package) for hardware-accelerated H.264/H.265 decode
+    libavcodec-dev libavformat-dev libavutil-dev libswscale-dev \
+    # Required by onvif-zeep SOAP client
+    libxml2-dev libxslt-dev \
+    # Required by Hikvision/Dahua SDK .so files
+    libssl-dev libcrypto++-dev \
     && rm -rf /var/lib/apt/lists/*
+
+# ── SDK directories: place vendor .so files here at deploy time ──────────────
+# Hikvision HCNetSDK: edge/sdk/hikvision/libhcnetsdk.so (+ deps)
+# Dahua NetSDK:       edge/sdk/dahua/libdhnetsdk.so
+# These are optional — the system falls back to ONVIF/RTSP if absent.
+RUN mkdir -p /app/sdk/hikvision/HCNetSDKCom /app/sdk/dahua
+# Add SDK dirs to the dynamic linker path so the .so files are found at runtime
+RUN echo "/app/sdk/hikvision" >> /etc/ld.so.conf.d/hikvision.conf && \
+    echo "/app/sdk/hikvision/HCNetSDKCom" >> /etc/ld.so.conf.d/hikvision.conf && \
+    echo "/app/sdk/dahua" >> /etc/ld.so.conf.d/dahua.conf && \
+    ldconfig
 
 COPY requirements.txt .
 # The NVIDIA base image ships its own opencv .so; pip uninstall only removes

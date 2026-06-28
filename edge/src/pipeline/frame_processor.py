@@ -38,6 +38,9 @@ _CLR_MASKED  = (0, 220, 220)   # yellow  — face mask detected
 _FONT        = cv2.FONT_HERSHEY_SIMPLEX
 
 _INFERENCE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference")
+# One worker per camera so multiple cameras can encode frames concurrently.
+# max_workers=4 covers up to 4 cameras; extra cameras share the last slot.
+_MJPEG_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mjpeg-encode")
 
 
 def _enhance_face(face_img: np.ndarray) -> np.ndarray:
@@ -134,26 +137,43 @@ class FrameProcessor:
         # all of its state (obs buffer, label, cooldown) can be dropped.
         self._track_seen: dict[int, float] = {}
         self._gc_ttl_s = max(8.0, float(config.get("vote_ttl_seconds", 3)) * 3)
+        self._last_tracks: list = []  # cached for MJPEG overlay on dropped frames
+        self._mjpeg_busy = False      # drop-if-busy gate for MJPEG encoder
+
+    def push_mjpeg(self, frame: np.ndarray) -> None:
+        """Push a frame to the MJPEG live feed from any thread, drop-if-busy.
+
+        Called directly from the RTSPReader dispatch thread so the live stream
+        updates at camera FPS without touching the async event loop at all.
+        """
+        if self._mjpeg is not None and not self._mjpeg_busy:
+            self._mjpeg_busy = True
+            _MJPEG_EXECUTOR.submit(self._encode_and_push, frame)
 
     async def process(self, frame: np.ndarray, ts: float):
-        # Drop frame if previous inference is still running.
-        # Without this, frames queue up in the executor and cause accumulating delay.
+        # MJPEG is pushed from the dispatch-thread callback before this coroutine
+        # is even scheduled, so we don't touch it here.
+
+        # Drop frame for inference if previous inference is still running.
         if self._busy:
             return
         self._busy = True
         try:
             loop = asyncio.get_running_loop()
             events = await loop.run_in_executor(_INFERENCE_EXECUTOR, self._process_sync, frame, ts)
-            for event in events:
-                await self.publisher.publish(event)
         finally:
+            # Release the busy gate as soon as inference is done — NOT after HTTP publish.
             self._busy = False
+
+        for event in events:
+            asyncio.ensure_future(self.publisher.publish(event))
 
     def _process_sync(self, frame: np.ndarray, ts: float) -> list[dict]:
         events: list[dict] = []
         self._frame_count += 1
 
         tracks = self.detector.track(frame)
+        self._last_tracks = tracks  # cache for MJPEG overlay on dropped frames
         for t in tracks:
             self._track_seen[t.track_id] = ts
 
@@ -201,11 +221,13 @@ class FrameProcessor:
             # SR doubles the face crop resolution (e.g. 80x80 → 160x160) so
             # ArcFace operates on more pixels. Enhancement then recovers texture
             # lost to H.264 compression. Together: +10-25% similarity on V380.
+            snap_face = face_img  # default snapshot source — overwritten if enhancement runs
             if self.enhance_faces and face_img.size > 0:
                 # 1. Neural 2x upscale (FSRCNN) — adds real detail, not just bigger pixels
                 sr_face = self._face_sr.upscale(face_img) if self._face_sr else face_img
                 # 2. Classical enhancement on the upscaled crop
                 enhanced = _enhance_face(sr_face)
+                snap_face = enhanced  # save the enhanced version to disk, not the raw crop
                 # Re-embed from the upscaled+sharpened crop
                 reembed = self.recognizer.detect_and_embed(enhanced)
                 if reembed:
@@ -223,7 +245,9 @@ class FrameProcessor:
             obs = {
                 "emp_id": emp_id, "score": float(score),
                 "is_live": bool(is_live), "spoof_score": float(spoof_score),
-                "det_score": float(det_score), "face_img": face_img, "ts": ts,
+                "det_score": float(det_score), "face_img": snap_face,
+                "person_crop": crop,  # wider shot — used for the saved snapshot
+                "ts": ts,
             }
             buf = self._track_obs.setdefault(tr.track_id, [])
 
@@ -255,21 +279,61 @@ class FrameProcessor:
                     else:
                         self._spoof_tracks.discard(tr.track_id)
 
-        if self._mjpeg is not None:
-            # Resize to 720p before encoding — 1080p JPEG encode costs ~80ms on CPU,
-            # 720p costs ~35ms, 640p costs ~15ms. Inference thread must not be blocked
-            # by encoding. Preview quality at 720p is still sharp on any dashboard screen.
-            h, w = frame.shape[:2]
-            if w > 1280:
-                scale = 1280 / w
-                preview = cv2.resize(frame, (1280, int(h * scale)),
-                                     interpolation=cv2.INTER_LINEAR)
-            else:
-                preview = frame
-                scale = 1.0
-            annotated = self._draw_overlays(preview, tracks, bbox_scale=scale)
-            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
-            self._mjpeg.put_frame(self.camera_id, jpeg.tobytes())
+        # ── Duplicate-identity spoof detection ────────────────────────────────
+        # If two confirmed tracks in the same frame both match the same employee,
+        # the smaller bounding-box face is a phone/tablet/print replica.
+        # This fires immediately — no vote accumulation needed — because showing
+        # someone's own photo to the camera always produces exactly this pattern.
+        emp_to_tracks: dict[str, list[tuple[int, float]]] = defaultdict(list)
+        for tr in confirmed:
+            buf = self._track_obs.get(tr.track_id)
+            if not buf or len(buf) < 2:
+                continue
+            # Count votes per employee in this track's observation buffer
+            vote_map: dict[str, int] = defaultdict(int)
+            for obs in buf:
+                if obs["emp_id"]:
+                    vote_map[obs["emp_id"]] += 1
+            if not vote_map:
+                continue
+            top_emp = max(vote_map, key=vote_map.__getitem__)
+            if vote_map[top_emp] < 2:
+                continue
+            area = (tr.bbox[2] - tr.bbox[0]) * (tr.bbox[3] - tr.bbox[1])
+            emp_to_tracks[top_emp].append((tr.track_id, area))
+
+        for emp_id, track_areas in emp_to_tracks.items():
+            if len(track_areas) < 2:
+                continue
+            # Largest bounding box = closest real person; smaller = phone replica
+            track_areas.sort(key=lambda x: x[1], reverse=True)
+            for dup_track_id, _ in track_areas[1:]:
+                if self._in_cooldown(dup_track_id, ts):
+                    continue
+                log.warning(
+                    "[%s] PHONE/PRINT SPOOF — emp=%s seen in track %d (duplicate, smaller face)",
+                    self.camera_id, emp_id[:8], dup_track_id,
+                )
+                self._track_labels[dup_track_id] = ("SPOOF", _CLR_SPOOF)
+                self._spoof_tracks.add(dup_track_id)
+                self._cooldown[dup_track_id] = ts
+                face_obs = (self._track_obs.get(dup_track_id) or [{}])[-1]
+                snap = self._save_snapshot(
+                    face_obs.get("person_crop", face_obs.get("face_img",
+                        np.zeros((64, 64, 3), np.uint8))),
+                    None, ts, is_unknown=True,
+                )
+                events.append({
+                    "type": "spoof_attempt",
+                    "camera_id": self.camera_id,
+                    "track_id": dup_track_id,
+                    "timestamp": ts,
+                    "snapshot_url": snap,
+                    "is_live": False,
+                    "spoof_score": 0.0,
+                    "employee_id": emp_id,
+                    "confidence": 0,
+                })
 
         return events
 
@@ -279,19 +343,19 @@ class FrameProcessor:
         majority = max(2, math.ceil(n / 2))
         threshold = self.face_search.threshold
 
-        # 1) Spoof — fire if liveness fails in 25% or more of frames.
-        # Phone/tablet replays often pass the liveness check on a few frames
-        # (perspective shift, glare) but consistently fail on the rest.
-        # ceil(n/4) is more aggressive than the old (majority-1): at n=7 this
-        # requires only 2 spoof frames instead of 3.
-        spoof_threshold = max(1, math.ceil(n / 4))
+        # 1) Spoof — fire if liveness fails in 40% or more of frames.
+        # Raised from ceil(n/4) to ceil(n/2.5) so a single frame with a transient
+        # liveness dip (motion blur, partial occlusion) doesn't flag a real employee.
+        # At n=5: old=2 frames needed, new=2 (same); at n=2: old=1, new=1 still,
+        # but the minimum is now 2 so one bad frame alone never fires spoof.
+        spoof_threshold = max(2, math.ceil(n / 2.5))
         spoof_obs = [o for o in buf if not o["is_live"]]
         if len(spoof_obs) >= spoof_threshold:
             rep = min(spoof_obs, key=lambda o: o["spoof_score"])
             log.warning(f"[{self.camera_id}] SPOOF confirmed track={track_id} "
                         f"({len(spoof_obs)}/{n} frames, score={rep['spoof_score']:.3f})")
             self._track_labels[track_id] = ("SPOOF", _CLR_SPOOF)
-            snap = self._save_snapshot(rep["face_img"], None, ts, is_unknown=True)
+            snap = self._save_snapshot(rep.get("person_crop", rep["face_img"]), None, ts, is_unknown=True)
             return {
                 "type": "spoof_attempt", "camera_id": self.camera_id,
                 "track_id": track_id, "timestamp": ts, "snapshot_url": snap,
@@ -316,7 +380,7 @@ class FrameProcessor:
                 log.info(f"[{self.camera_id}] RECOGNIZED {name} (emp={winner}) "
                          f"votes={wcount}/{n} mean_sim={wmean:.3f}")
                 self._track_labels[track_id] = (name, _CLR_KNOWN)
-                snap = self._save_snapshot(best["face_img"], winner, ts)
+                snap = self._save_snapshot(best.get("person_crop", best["face_img"]), winner, ts)
                 return {
                     "type": "recognition", "camera_id": self.camera_id,
                     "direction": self.direction, "track_id": track_id,
@@ -339,7 +403,7 @@ class FrameProcessor:
             log.info(f"[{self.camera_id}] UNKNOWN confirmed track={track_id} "
                      f"(best_sim={best['score']:.3f}, threshold={threshold})")
         self._track_labels[track_id] = ("Unknown", _CLR_UNKNOWN)
-        snap = self._save_snapshot(best["face_img"], None, ts, is_unknown=True)
+        snap = self._save_snapshot(best.get("person_crop", best["face_img"]), None, ts, is_unknown=True)
         return {
             "type": "unknown_person", "camera_id": self.camera_id,
             "direction": self.direction, "track_id": track_id,
@@ -392,6 +456,30 @@ class FrameProcessor:
                 self._spoof_tracks.discard(tid)
                 self._mask_cooldown.pop(tid, None)
                 self.anti_spoof.clear_track(tid)
+
+    def _encode_and_push(self, frame: np.ndarray) -> None:
+        """Encode frame to JPEG and push to the MJPEG live feed.
+
+        Runs in _MJPEG_EXECUTOR (separate from inference) so the camera stream
+        updates at camera FPS rather than stuttering at the slower inference rate.
+        Uses the last known tracks/labels so overlays stay visible on dropped frames.
+        """
+        try:
+            h, w = frame.shape[:2]
+            if w > 1280:
+                scale = 1280 / w
+                preview = cv2.resize(frame, (1280, int(h * scale)),
+                                     interpolation=cv2.INTER_LINEAR)
+            else:
+                preview = frame
+                scale = 1.0
+            annotated = self._draw_overlays(preview, self._last_tracks, bbox_scale=scale)
+            _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            self._mjpeg.put_frame(self.camera_id, jpeg.tobytes())
+        except Exception:
+            pass
+        finally:
+            self._mjpeg_busy = False
 
     def _draw_overlays(self, frame: np.ndarray, tracks,
                        bbox_scale: float = 1.0) -> np.ndarray:
@@ -455,7 +543,36 @@ class FrameProcessor:
         y2 = min(h, y2 + py)
         return img[y1:y2, x1:x2]
 
-    def _save_snapshot(self, face_img, emp_id, ts, is_unknown: bool = False) -> str:
+    @staticmethod
+    def _fix_exposure(img: np.ndarray) -> np.ndarray:
+        """Correct dark / underexposed snapshots so they are legible in the log.
+
+        Two-stage pipeline:
+          1. Gamma correction — if the image is dark overall, apply a brightening
+             gamma (<1.0) to lift shadows without blowing out highlights.
+          2. CLAHE per-channel — restores local contrast so face details (eyes,
+             skin texture) stay sharp even after global brightening.
+        """
+        if img is None or img.size == 0:
+            return img
+        mean_lum = float(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY).mean())
+
+        # Only correct images that are genuinely dark (mean < 100 out of 255).
+        # Bright or well-lit shots are left unchanged to avoid washing them out.
+        if mean_lum < 100:
+            # Gamma: 0.4 for very dark (<40), scaling linearly to 1.0 at 100.
+            gamma = max(0.4, mean_lum / 100.0)
+            table = np.array([((i / 255.0) ** gamma) * 255
+                              for i in range(256)], dtype=np.uint8)
+            img = cv2.LUT(img, table)
+
+        # CLAHE on each BGR channel independently to restore local contrast.
+        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
+        b, g, r = cv2.split(img)
+        img = cv2.merge([clahe.apply(b), clahe.apply(g), clahe.apply(r)])
+        return img
+
+    def _save_snapshot(self, img, emp_id, ts, is_unknown: bool = False) -> str:
         if is_unknown:
             d = os.path.join(self.snapshot_dir, "unknown")
         else:
@@ -463,7 +580,22 @@ class FrameProcessor:
         os.makedirs(d, exist_ok=True)
         path = os.path.join(d, f"{int(ts)}.jpg")
         try:
-            cv2.imwrite(path, face_img)
+            if img is None or img.size == 0:
+                return path
+
+            # 1. Fix dark / underexposed frames before saving.
+            img = self._fix_exposure(img)
+
+            # 2. Enforce a minimum display size so log thumbnails are readable.
+            #    320px is the smallest that shows face detail clearly in a grid.
+            h, w = img.shape[:2]
+            if h < 320 or w < 320:
+                scale = max(320 / h, 320 / w)
+                img = cv2.resize(img, (int(w * scale), int(h * scale)),
+                                 interpolation=cv2.INTER_LANCZOS4)
+
+            # 3. Save at high quality — 95 is near-lossless for faces.
+            cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 95])
         except Exception:
             pass
         return path

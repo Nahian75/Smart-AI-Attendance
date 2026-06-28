@@ -3,34 +3,62 @@ tenant_id: demo
 # ── Device ───────────────────────────────────────────────────────────────────
 device: auto              # auto = GPU if available, else CPU
 use_gstreamer: false      # true only on NVIDIA Jetson with HW decoder
-yolo_model: yolo11s.pt   # s = best speed/accuracy for RTX 3050
+yolo_model: yolo11s.pt
 tracker: bytetrack.yaml
 antispoof_model: weights/antispoof_128.onnx
 
-# ── Recognition thresholds (tuned for V380 / budget WiFi cameras) ────────────
-# Heavy H.264/H.265 compression on budget cameras reduces ArcFace similarity
-# scores by ~15–20% vs. good IP cameras. Thresholds set accordingly.
-recognition_threshold: 0.42   # raise to 0.55+ when using quality cameras
-liveness_threshold: 0.45      # budget cameras blur faces → lower liveness scores
-
-# ── Face enhancement (V380 / HiVideo compensation) ───────────────────────────
-# Bilateral denoise + unsharp mask + CLAHE before ArcFace embedding.
-# Recovers detail destroyed by heavy H.264 compression. +5–15% similarity.
-# Disable (false) if using quality cameras — unnecessary overhead.
+# ════════════════════════════════════════════════════════════════════════════
+#  GLOBAL DEFAULTS  (applied to every camera unless overridden below)
+#  Tuned for Hikvision 1080p H.265 via DVR — your majority camera type.
+# ════════════════════════════════════════════════════════════════════════════
+recognition_threshold: 0.52
+liveness_threshold: 0.40
+min_det_score: 0.55
 enhance_faces: true
+superres: false
+superres_model: edge/weights/FSRCNN_x2.pb
+vote_window: 6
+min_votes: 4
+fps_target: 0             # 0 = auto-detect from stream (recommended)
+vote_ttl_seconds: 8
+cooldown_seconds: 300
 
-# ── Multi-frame voting ────────────────────────────────────────────────────────
-min_det_score: 0.48      # relaxed — budget cameras produce lower face det_scores
-vote_window: 5           # collect 5 frames max per person
-min_votes: 3             # decide after 3 good frames (~0.5s at 6fps)
-vote_ttl_seconds: 3      # clear stale vote buffer after 3s of no sighting
-cooldown_seconds: 300    # 5 min between re-detections of same person
+# ════════════════════════════════════════════════════════════════════════════
+#  PER-CAMERA PROFILE OVERRIDES
+#  Matched by camera name or rtsp_url (case-insensitive substring).
+#  First match wins. Use the camera name you registered in the dashboard.
+# ════════════════════════════════════════════════════════════════════════════
+camera_profiles:
 
-# ── Stream settings ───────────────────────────────────────────────────────────
-fps_target: 6            # 6fps is enough for recognition, saves GPU vs 10fps
+  # ── Hikvision 1080p H.265 via DVR ────────────────────────────────────────
+  # Matches any camera whose name or URL contains "hik" or "dvr".
+  # H.265 1080p crops are already large and sharp — no SR or enhancement needed.
+  - match: ["hik", "dvr", "hikvision"]
+    recognition_threshold: 0.52
+    liveness_threshold: 0.40
+    min_det_score: 0.55
+    enhance_faces: false    # 1080p H.265 is sharp enough without enhancement
+    superres: false
 
-# Cameras are loaded from the backend database (registered via the dashboard).
-# Add cameras using the Cameras page in the web UI — no hardcoding needed here.
-# This fallback list is only used if the backend API is unreachable at startup.
-# Leave empty so the edge node waits for backend rather than trying a broken URL.
+  # ── HiVideo budget WiFi camera (H.264, 720p) ─────────────────────────────
+  # Matches any camera whose name or URL contains "hivideo", "hiv", or "v380".
+  # Heavy H.264 compression needs SR + enhancement for reliable recognition.
+  - match: ["hivideo", "hiv", "v380", "wifi"]
+    recognition_threshold: 0.42
+    liveness_threshold: 0.38
+    min_det_score: 0.48
+    enhance_faces: true
+    superres: false         # SR disabled for speed; enhancement alone is enough
+
+# ════════════════════════════════════════════════════════════════════════════
+#  CAMERA SOURCES (fallback if backend API is unreachable at startup)
+#
+#  Hikvision via DVR RTSP URL format:
+#    Channel 1 main stream:  rtsp://admin:password@DVR_IP:554/Streaming/Channels/101
+#    Channel 2 main stream:  rtsp://admin:password@DVR_IP:554/Streaming/Channels/201
+#    Sub-stream (avoid):     rtsp://admin:password@DVR_IP:554/Streaming/Channels/102
+#
+#  HiVideo / V380 RTSP URL format:
+#    rtsp://admin:password@CAMERA_IP:554/stream1
+# ════════════════════════════════════════════════════════════════════════════
 cameras: []

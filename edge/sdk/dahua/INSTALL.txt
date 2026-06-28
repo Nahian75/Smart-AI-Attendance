@@ -1,0 +1,22 @@
+Dahua NetSDK — Linux 64-bit
+============================
+
+Download from: https://www.dahuasecurity.com/support/downloadCenter
+→ "Device Network SDK" → "Linux 64-bit"
+
+Works for: Dahua, Amcrest, Lorex, ANNKE, Swann (all OEM Dahua).
+
+After extracting, copy these files into THIS directory:
+
+  REQUIRED:
+    libdhnetsdk.so
+    libConfigSdk.so
+    libdhnetsdk.so
+
+  OPTIONAL:
+    libStreamSdk.so
+
+After copying, restart the edge container:
+  docker compose restart edge_node
+
+No rebuild needed — the SDK directory is mounted as a volume.

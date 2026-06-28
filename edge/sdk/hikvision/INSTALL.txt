@@ -1,0 +1,26 @@
+Hikvision HCNetSDK — Linux 64-bit
+==================================
+
+Download from: https://www.hikvision.com/en/support/download/sdk/
+→ "Device Network SDK" → "Linux 64-bit"
+
+After extracting, copy these files into THIS directory:
+
+  REQUIRED:
+    libhcnetsdk.so
+    libHCCore.so
+    libhpr.so
+    libStreamPlay.so
+
+  OPTIONAL (for hardware decode):
+    libPlayCtrl.so
+
+  USUALLY ALREADY ON SYSTEM (but copy here if missing):
+    libcrypto.so.1.1
+    libssl.so.1.1
+
+After copying, restart the edge container:
+  docker compose restart edge_node
+
+No rebuild needed — the SDK directory is mounted as a volume.
+The system falls back to ONVIF/RTSP if these files are absent.

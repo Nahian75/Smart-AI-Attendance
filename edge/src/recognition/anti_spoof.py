@@ -81,28 +81,52 @@ class AntiSpoofChecker:
         if image is None or image.size == 0:
             return True, 1.0  # nothing to judge — don't block
 
+        face_tight = self._tight_face(image, bbox)
+
         if self.session is not None:
             score = self._model_infer(image, bbox)
         else:
-            face = self._tight_face(image, bbox)
-            score = self._heuristic_infer(face)
+            score = self._heuristic_infer(face_tight)
 
-            # Screen context: check if the area surrounding the face bbox is
-            # abnormally bright and uniform — the hallmark of a phone/tablet
-            # screen.  Only applied in heuristic mode; the CNN handles it itself.
-            if bbox is not None:
-                ctx = self._screen_context_check(image, bbox)
-                # Blend: a high ctx score drags the liveness score down hard.
-                score = score * (1.0 - ctx * 0.70)
+        # ── Screen-context: uniform backlit surround (works for model + heuristic) ──
+        if bbox is not None:
+            ctx = self._screen_context_check(image, bbox)
+            score = score * (1.0 - ctx * 0.75)
 
-        # Temporal gate: histogram comparison is shift-invariant — hand tremor
-        # moves the crop by 2-3 px but doesn't change the histogram, so a static
-        # phone photo accumulates spoof evidence even when the hand shakes.
+        # ── Color-temperature: phone screens are blue-shifted; real skin is warm ──
+        if face_tight is not None and face_tight.size > 0:
+            score = score * self._color_temp_check(face_tight)
+
+        # ── Temporal gate: catches static phone photos via histogram comparison ──
         if track_id is not None:
-            face_for_temporal = self._tight_face(image, bbox)
-            score = self._temporal_gate(score, face_for_temporal, track_id)
+            score = self._temporal_gate(score, face_tight, track_id)
 
         return score >= self.threshold, round(float(score), 4)
+
+    @staticmethod
+    def _color_temp_check(face_bgr: np.ndarray) -> float:
+        """Return a liveness multiplier based on skin colour temperature.
+
+        Phone/tablet screens backlight the displayed photo with a cold
+        blue-white LED (~6500 K). Real skin lit by indoor lighting has
+        warm tones where the red channel dominates the blue channel.
+
+        Multiplier = 1.0 (no change) for warm-toned faces.
+        Multiplier approaches 0.0 as the face becomes increasingly blue-shifted.
+        """
+        if face_bgr is None or face_bgr.size == 0:
+            return 1.0
+        img = cv2.resize(face_bgr, (64, 64)).astype(np.float32)
+        mean_b = float(img[:, :, 0].mean())
+        mean_r = float(img[:, :, 2].mean())
+        if mean_r < 1.0:
+            return 1.0
+        # blue_ratio > 1.0  → screen-like (cold light)
+        # blue_ratio < 0.85 → real skin (warm light)
+        blue_ratio = mean_b / mean_r
+        # Linear ramp: no penalty below 0.85, full penalty at ratio ≥ 1.30
+        penalty = min(1.0, max(0.0, (blue_ratio - 0.85) / 0.45))
+        return 1.0 - penalty * 0.60  # at ratio=1.30 → ×0.40 multiplier
 
     def _temporal_gate(self, score: float, face: np.ndarray, track_id: int) -> float:
         """
@@ -126,17 +150,24 @@ class AntiSpoofChecker:
         state = self._temporal.setdefault(track_id, {"prev_hist": None, "static_count": 0})
         if state["prev_hist"] is not None:
             diff = float(np.sum(np.abs(hist - state["prev_hist"])))
-            # Static photo on phone: diff ≈ 0.01–0.05 (camera noise only)
-            # Live face: diff ≈ 0.08–0.25 (micro-expressions, blinks, breathing)
-            if diff < 0.07:
+            # Phone photo on screen: diff ≈ 0.01–0.04 (essentially frozen)
+            # Real employee standing still: diff ≈ 0.06–0.15 (breathing, micro-expressions)
+            if diff < 0.055:
                 state["static_count"] = min(state["static_count"] + 1, 12)
             else:
                 state["static_count"] = max(0, state["static_count"] - 1)
         state["prev_hist"] = hist.copy()
 
-        # Ramp penalty: count=3 → ×0.67, count=7 → ×0.33, count=11+ → ×0.0
-        if state["static_count"] >= 3:
-            penalty = max(0.0, 1.0 - (state["static_count"] - 2) / 9.0)
+        # Penalty starts from count=1 (the SECOND frame we see this face).
+        # With min_votes=4 the decision happens at frame 4. By that point a
+        # static phone photo accumulates count=3 → 62.5% penalty, driving the
+        # model score (typically 0.50–0.65 for a phone) below the threshold.
+        # A real employee whose diff drops below 0.055 briefly gets at most
+        # 12.5% reduction at count=1, which doesn't affect a confident match.
+        #   count=1: ×0.875   count=2: ×0.750   count=3: ×0.625
+        #   count=4: ×0.500   count=6: ×0.250   count=8+: → 0
+        if state["static_count"] >= 1:
+            penalty = max(0.0, 1.0 - state["static_count"] / 8.0)
             score = score * penalty
         return score
 

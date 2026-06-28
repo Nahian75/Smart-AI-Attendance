@@ -146,6 +146,8 @@ class AttendanceService:
                     log.is_late = True
                     log.late_by_min = int(late_min)
                     log.status = "late"
+                    from .notification_service import NotificationService
+                    await NotificationService().notify_late(employee.full_name, int(late_min))
             # PRD §5.2: occupancy +1 on entrance
             zone = (cam.camera_zone if cam else None) or str(employee.branch_id or "default")
             await self.occupancy.enter(tenant_id, zone)

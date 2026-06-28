@@ -1,49 +1,46 @@
 # Developer Notes — Smart AI Attendance System
 
-Architecture decisions, bug-fix log, and extension guide for contributors.
+Architecture decisions, bug-fix log, extension guide, and tuning reference for contributors.
 
 ---
 
 ## Architecture Decisions
 
 ### Why FastAPI + async SQLAlchemy?
-The backend is I/O heavy: each recognition event hits the DB, Redis (cooldown check, pub/sub), and potentially Slack. Async FastAPI + asyncpg keeps all of this non-blocking on a single worker. Celery handles anything that can be deferred (marking absentees, retention cleanup, snapshot purge).
+The backend is I/O heavy: each recognition event hits the DB, Redis (cooldown check, pub/sub), and optionally SMTP + Slack. Async FastAPI + asyncpg keeps all of this non-blocking on a single worker. Celery handles deferrable work (marking absentees, retention cleanup, email digest).
 
 ### Why pgvector instead of a dedicated vector DB?
-Face embeddings are 512-d floats. We store them in pgvector so joins with the `employees` table are free. The edge node uses FAISS locally for sub-millisecond nearest-neighbour search and syncs from Postgres every 60 s. This avoids a network round-trip on every frame while keeping the DB as source of truth.
+Face embeddings are 512-d floats stored in pgvector so joins with `employees` are free. The edge node uses FAISS locally for sub-millisecond search and syncs from Postgres every 60 s. This avoids a network round-trip on every frame while keeping the DB as source of truth.
 
 ### Why FAISS on the edge, not the backend?
-Face matching must run at camera frame rate (5–10 fps per camera). A backend HTTP call per frame adds 10–50 ms round-trip latency. FAISS on the edge does the search in < 1 ms. The backend only receives confirmed match events.
+Face matching must run at camera frame rate (5–10 fps). A backend HTTP call per frame adds 10–50 ms latency. FAISS on the edge does the search in < 1 ms. The backend only receives confirmed match events.
 
 ### Why multi-frame voting instead of per-frame decisions?
-ArcFace similarity for the same person varies frame-to-frame (e.g. 0.35–0.58) due to pose, blur, and lighting. Deciding on a single frame causes flip-flopping between "recognised" and "unknown". The voting engine accumulates `vote_window` (default 7) quality-gated observations per track and decides when `min_votes` (default 4) are collected. The winning employee needs both a majority of frames AND mean similarity above the threshold. This eliminates the need to lower the threshold to catch bad frames.
+ArcFace similarity for the same person varies frame-to-frame (0.35–0.58) due to pose, blur, and lighting. Single-frame decisions cause flip-flopping. The voting engine accumulates `vote_window` quality-gated observations per ByteTrack ID and decides when `min_votes` are collected. The winning employee needs both a majority of frames AND mean similarity above threshold.
 
 ### Why top-K FAISS matching instead of single top-1?
-Each employee may have multiple enrolled photos (different angles, lighting). Single top-1 lookup returns whichever enrolled embedding happens to be closest — one bad enrollment photo can dominate. Top-K retrieves the `top_k` (default 5) nearest embeddings, groups them by employee, and scores each candidate as the mean of their similarities in that neighbourhood. This is more robust to partial facial occlusion and lighting variation.
+Each employee has multiple enrolled photos. Single top-1 returns whichever enrolled embedding is closest — one bad photo can dominate. Top-K retrieves the K nearest, groups by employee, scores by mean similarity in that neighbourhood. More robust to partial occlusion and lighting variation.
+
+### Why FSRCNN for face-crop super-resolution?
+V380 and budget WiFi cameras apply heavy H.264 quantisation — faces at typical entry-gate distances end up as 50–100 px wide crops. FSRCNN-small_x2 (9.4 KB) runs in 1–3 ms per crop on CPU and gives genuine 2× resolution from CNN weights, not just bicubic interpolation. Applied before ArcFace embedding it lifts similarity scores 10–25% on compressed streams. Full-frame SR would cost ~400 ms/frame (unusable); face-crop SR adds ~2 ms.
+
+### Why the anti-spoof heuristic uses luminance variance?
+Screen backlight emits spatially uniform light: a phone held to the camera has very uniform block-mean luminance across the face region. Real faces under room lighting have natural shadow gradients. This cue survives H.264 compression — unlike FFT moiré detection which requires the screen pixel grid to be preserved in the stream (it isn't on V380). The luminance score carries 25% weight in the heuristic.
+
+### Why spoof voting fires at majority-1 frames?
+The MiniFASNet model assigns P(live) scores that vary per frame — a phone held at an angle may score above the threshold 2 out of 5 times. Using strict majority (ceil(n/2)) allowed these marginal attacks through. Firing at `max(1, majority-1)` requires only one less spoof frame to trigger, catching phone replays that occasionally fool the model.
 
 ### Why one ONNX Runtime session per model?
-InsightFace's `FaceAnalysis.prepare()` loads the SCRFD detector and ArcFace recognition model into a single session. Sharing this across all cameras in a single process (via the shared `ArcFaceRecognizer` instance) avoids loading 500 MB of weights multiple times. `_INFERENCE_EXECUTOR` in `frame_processor.py` serialises inference calls so the models are used from one thread at a time.
-
-### Why a single inference thread?
-ONNX Runtime CUDA sessions are not thread-safe across concurrent `run()` calls on the same session. Serialising via `ThreadPoolExecutor(max_workers=1)` eliminates races without per-camera model copies.
+InsightFace `FaceAnalysis.prepare()` loads SCRFD + ArcFace into a single session. Sharing across cameras via the shared `ArcFaceRecognizer` instance avoids loading 500 MB of weights multiple times. `_INFERENCE_EXECUTOR(max_workers=1)` in `frame_processor.py` serialises inference calls so models are used from one thread at a time (CUDA sessions are not thread-safe).
 
 ### Why Redis for cooldowns and pub/sub?
-Cooldown keys (`cooldown:{emp}:{cam}`) expire automatically via Redis TTL — no cleanup job needed. Pub/sub pushes attendance events to two WebSocket channels (`attendance:{tenant}` and `alerts:{tenant}`) without polling. Redis restart is safe: cooldowns reset (mildly permissive) and live-feed history restarts (cosmetic).
+Cooldown keys (`cooldown:{emp}:{cam}`) expire automatically via Redis TTL — no cleanup job needed. Pub/sub pushes events to two WebSocket channels without polling. Redis restart is safe: cooldowns reset (mildly permissive) and live-feed history restarts (cosmetic only).
 
 ### Why separate WebSocket channels for attendance and alerts?
-The `attendance:{tenant}` channel carries both raw edge events (recognition, unknown_person, spoof_attempt) and processed backend results (check_in, check_out). The `alerts:{tenant}` channel carries only security alert payloads from `AlertService.fire()`. Separating them means the alert panel connects to `/ws/alerts/` and receives alerts the moment they are created — without polling and without filtering out attendance noise.
+`attendance:{tenant}` carries raw edge events and processed backend results. `alerts:{tenant}` carries only security alert payloads from `AlertService.fire()`. Separating them means the alert panel receives alerts the moment they are created — without polling and without filtering attendance noise.
 
-### JWT design
-Tokens carry `sub` (user UUID), `tenant_id`, `role`, `exp`, `iat`. The backend never hits the DB to validate a token — everything needed for auth and RBAC is in the payload. Token refresh issues a new token from a still-valid one; expired tokens must re-login.
-
-### Tenant isolation
-Every DB table has a `tenant_id` FK. Every query filters by `user.tenant_id` from the JWT. A single API instance serves multiple tenants without data leakage.
-
-### Why nginx on port 8080 instead of 80?
-Docker Desktop on Windows reserves port 80 internally. Port 80 conflicts prevent the nginx container from binding. Port 8080 is used instead and is documented in `.env` via `NEXT_PUBLIC_API_URL`.
-
-### Snapshot storage and auto-purge
-Snapshots (face crops from detections) are saved by the edge node to `/app/snapshots/{employee_id|unknown}/{timestamp}.jpg` and served via FastAPI `StaticFiles` at `/snapshots/`. A Celery beat task (`purge_snapshots`) runs nightly at 3 AM and deletes files older than 7 days. DB records are retained for 90 days (configurable via `EVENT_RETENTION_DAYS`).
+### Why SMTP runs in a ThreadPoolExecutor?
+`smtplib` is blocking. Running it in `_MAIL_POOL` (single-threaded executor) keeps the FastAPI async event loop unblocked. A single thread is enough — email is best-effort, not latency-sensitive.
 
 ---
 
@@ -51,45 +48,57 @@ Snapshots (face crops from detections) are saved by the edge node to `/app/snaps
 
 ```
 backend/app/
-  config.py                    Settings (pydantic-settings); production secret warnings
+  config.py                    Settings (pydantic-settings); SMTP, Slack, thresholds, storage
   dependencies.py              FastAPI deps: get_db, get_current_user, role_required, verify_edge_token
-  main.py                      App factory: middleware, route registration, lifespan (Redis),
-                                StaticFiles mount for /snapshots/
+  main.py                      App factory: middleware, route registration, lifespan (Redis), StaticFiles
   core/security.py             hash_password, verify_password, create_access_token, decode_token
   core/middleware.py           TenantMiddleware, RateLimitMiddleware (in-memory, per-IP)
   models/attendance.py         RecognitionEvent, AttendanceLog, Alert, UnknownDetection
   models/shift.py              Shift, EmployeeShift — controls late/early/OT classification
-  services/attendance_service.py   Main logic: confidence gate, cooldown, shift calc, alerts,
-                                    _handle_unknown() fires unknown_person alert always (not just after-hours)
-  services/alert_service.py        Fires alerts to DB + Redis pub/sub (alerts:{tenant})
+  services/attendance_service.py   Main logic: confidence gate, cooldown, shift calc, alerts, late email
+  services/alert_service.py        Fires alerts → DB + Redis pub/sub + email (_notify_email)
+  services/notification_service.py SMTP email (TLS/STARTTLS via smtplib executor) + webhook fire
+  services/face_service.py         Enrollment + pgvector nearest-neighbour match
   api/v1/ws.py                 Two WebSocket endpoints: /ws/attendance/ and /ws/alerts/
   api/v1/detections.py         Unified detection evidence log: RecognitionEvent + UnknownDetection
-  api/v1/shifts.py             Shift CRUD + employee assignment
-  api/v1/admin.py              User management (list, create, change role, deactivate)
-  workers/tasks.py             apply_retention (DB), purge_snapshots (files, 7-day), mark_absentees
+  workers/tasks.py             apply_retention, purge_snapshots, mark_absentees, email_digest (implemented)
   workers/celery_app.py        Beat schedule: absentees@23:30, retention@02:00, snapshots@03:00, digest@18:00
 
 edge/src/
   utils/gpu.py                 Runtime GPU detection — single source of truth for ORT providers + torch device
-  detection/yolo_detector.py   YOLOv11 track() — device from gpu.py, 30% padded crops via frame_processor
-  recognition/arcface.py       InsightFace ArcFace R100 (det_size=960×960 for better small-face detection)
-  recognition/anti_spoof.py    MiniFASNet ONNX model (128×128, CelebA-Spoof trained) + heuristic fallback;
-                                uses exact upstream preprocessing: RGB, 1.5× bbox expansion, letterbox, /255
+  utils/superres.py            FaceSuperRes: FSRCNN x2 via cv2.dnn_superres; Lanczos fallback
+  detection/yolo_detector.py   YOLOv11 track() with ByteTrack; device from gpu.py
+  recognition/arcface.py       InsightFace ArcFace R100; auto det_size from camera resolution
+  recognition/anti_spoof.py    MiniFASNet ONNX (print+replay, 1.5× bbox crop, 128×128 RGB, /255)
+                                + heuristic: Laplacian(28%) + gradient(22%) + saturation(15%)
+                                           + FFT(10%) + luminance_patch_variance(25%)
+                                Spoof voting fires at majority-1 frames (stricter than majority)
   recognition/faiss_search.py  Top-K cosine search with per-employee mean aggregation; search_raw() for voting
-  pipeline/frame_processor.py  Multi-frame voting engine: face-quality gate (min_det_score), per-track
-                                observation buffer, majority-vote decision, provisional MJPEG labels
-  pipeline/event_publisher.py  Posts recognition, unknown_person, spoof_attempt to backend; publishes all to Redis
-  config/camera_config.yaml    All recognition thresholds — no rebuild needed, just restart edge_node
+  pipeline/frame_processor.py  Full pipeline: quality gate → anti-spoof → FSRCNN SR → enhance → embed → vote
+  pipeline/event_publisher.py  Posts all event types (recognition, unknown, spoof) to backend + Redis
+  config/camera_config.yaml    5 camera quality profiles; all recognition thresholds; no rebuild needed
+  weights/antispoof_128.onnx   MiniFASNet print+replay model (1.85 MB) — downloaded
+  weights/FSRCNN_x2.pb         FSRCNN-small x2 neural SR model (9.4 KB) — downloaded
+
+edge_standalone.py             Windows standalone (no Docker):
+                                - Anti-spoof: ONNX model + heuristic fallback (was hardcoded is_live=True)
+                                - Multi-frame voting: VoteBuffer (embedding-cluster pseudo-tracking)
+                                - GPU: CUDA / DirectML / CPU auto-detected
+                                - Face enhancement: bilateral + unsharp + CLAHE
+                                - Neural SR: FSRCNN x2 via FaceSuperRes inline class
+                                - Auto-reconnect: exponential backoff on stream failure
+                                - Embedding resync: every 60 s from backend
+                                - HTTP MJPEG support (DroidCam, IP Webcam app)
+                                - Logs actual stream resolution on connect
 
 frontend/src/
   lib/api.ts                   All API calls; 401 auto-refresh + redirect
   lib/websocket.ts             connectAttendanceWS() + connectAlertsWS() — both with auto-reconnect
   lib/rbac.ts                  hasRole(), useRole() hook
   components/live/
-    LiveEventFeed.tsx           Shows check_in/out (green), unknown_person (orange), spoof_attempt (red)
-    AlertsFeed.tsx              Real-time via connectAlertsWS(); fallback 10s poll
-  app/dashboard/detection-log/ Evidence log: every face capture with snapshot, confidence, camera, timestamp
-  components/ui/DashboardShell.tsx  Sidebar with Detection Log nav entry, role badge, theme toggle
+    LiveEventFeed.tsx           check_in/out (green), unknown_person (orange), spoof_attempt (red)
+    AlertsFeed.tsx              Real-time via connectAlertsWS(); fallback 10 s poll
+  app/dashboard/detection-log/ Evidence log: every face capture with snapshot, confidence, camera
 ```
 
 ---
@@ -99,18 +108,138 @@ frontend/src/
 ```
 Frame arrives from RTSPReader
   └─ YOLO track() → person bounding boxes (ByteTrack IDs)
-       └─ For each confirmed, non-cooldown track:
+       └─ For each confirmed track (is_confirmed() == True):
             └─ _crop_padded(frame, bbox, pad=0.30)   ← 30% padding ensures full head
-                 └─ ArcFaceRecognizer.detect_and_embed(crop)  ← det_size=960
-                      └─ face det_score < min_det_score (0.55)?  → SKIP (quality gate)
-                           └─ AntiSpoofChecker.check(crop, bbox) → (is_live, spoof_score)
-                                └─ FaissSearch.search_raw(embedding) → (best_emp, score)  ← no threshold
-                                     └─ Append to per-track vote buffer
-                                          └─ buffer.len >= min_votes (4)?
-                                               └─ _decide() → majority vote + mean similarity
-                                                    ├─ spoof_frames >= majority → spoof_attempt event
-                                                    ├─ winner_votes >= majority AND mean >= threshold → recognition event
-                                                    └─ vote_window full, no winner → unknown_person event
+                 └─ ArcFaceRecognizer.detect_and_embed(crop)  ← auto det_size
+                      └─ det_score < min_det_score?  → SKIP (quality gate)
+                           └─ AntiSpoofChecker.check(raw_crop, bbox)
+                              → (is_live, spoof_score)
+                              [uses raw unenhanced crop — enhancement removes screen artifacts]
+                                   └─ FaceSuperRes.upscale(face_crop)  ← FSRCNN x2 neural SR
+                                        └─ _enhance_face(sr_face)      ← bilateral+unsharp+CLAHE
+                                             └─ ArcFaceRecognizer.detect_and_embed(enhanced)
+                                                  └─ FaissSearch.search_raw(embedding)
+                                                       → (best_emp, score)  ← no threshold yet
+                                                            └─ Append to per-track vote buffer
+                                                                 └─ buffer.len >= min_votes?
+                                                                      └─ _decide()
+                                                                           ├─ spoof_frames >= majority-1
+                                                                           │   → spoof_attempt event
+                                                                           ├─ winner_votes >= majority
+                                                                           │   AND mean >= threshold
+                                                                           │   → recognition event
+                                                                           └─ window full, no winner
+                                                                               → unknown_person event
+```
+
+---
+
+## Anti-Spoof Model Details
+
+**Model:** `AntiSpoofing_print-replay_1.5_128.onnx` (saved as `antispoof_128.onnx`)
+- Source: `hairymax/Face-AntiSpoofing` on GitHub
+- Trained to detect both **print attacks** (photos) and **replay attacks** (phone/screen)
+- Input: `[1, 3, 128, 128]` float32, RGB, letterboxed, pixels / 255
+- Output: `[1, 2]` logits → softmax → **index 0 = P(live)**, index 1 = P(spoof)
+- Face bbox expanded **1.5× (bbox_inc)** before preprocessing — matches training crop
+- AUC-ROC ~0.987 on CelebA-Spoof binary classification
+
+**Spoof voting rule (frame_processor.py):**
+```python
+spoof_threshold = max(1, majority - 1)   # fires one frame earlier than majority
+spoof_obs = [o for o in buf if not o["is_live"]]
+if len(spoof_obs) >= spoof_threshold:
+    → spoof_attempt event
+```
+
+**Heuristic fallback** (when model file missing):
+| Cue | Weight | Why |
+|---|---|---|
+| Laplacian variance | 28% | Printed photos are blurry |
+| Sobel gradient energy | 22% | Low energy = flat surface |
+| HSV saturation std | 15% | Printed ink has less colour range |
+| FFT high-freq ratio | 10% | Screen moiré (weak on H.264 streams) |
+| Luminance patch variance | 25% | Screen backlight is uniform; real faces have shadow gradients |
+
+---
+
+## Neural Super-Resolution Details
+
+**Model:** FSRCNN-small_x2.pb (9.4 KB)
+- Source: `Saafke/FSRCNN_Tensorflow` on GitHub
+- Architecture: Fast Super-Resolution CNN — designed for real-time use
+- Scale: 2× (e.g., 70×70 face crop → 140×140)
+- Runtime: 1–3 ms per face crop on CPU via `cv2.dnn_superres`
+- Requires: `opencv-contrib-python` (NOT plain `opencv-python`)
+
+**Placement in pipeline:**
+- SR runs **after** anti-spoof, **before** ArcFace re-embedding
+- Anti-spoof intentionally uses the raw compressed crop — the screen pixel grid / moiré (however faint) is more visible before upscaling
+- ArcFace sees the upscaled+enhanced crop — more pixels = better 512-d embedding
+
+**Fallback:** If `cv2.dnn_superres` is unavailable or model missing, `FaceSuperRes.upscale()` falls back to `cv2.resize(..., INTER_LANCZOS4)` silently.
+
+---
+
+## Notification Service
+
+`backend/app/services/notification_service.py` — all outbound communications:
+
+```python
+# Email methods (all skip silently if SMTP not configured)
+await notifier.notify_spoof(camera_id, snapshot_url)
+await notifier.notify_intruder(camera_id, snapshot_url)
+await notifier.notify_blacklist(employee_name, camera_id, snapshot_url)
+await notifier.notify_late(employee_name, late_by_min)
+await notifier.notify_after_hours(employee_name, camera_id)
+await notifier.notify_digest(date_str, total, present, absent, late)
+```
+
+Called automatically from:
+- `AlertService._notify_email()` — for spoof, intruder, blacklist, after_hours alerts
+- `AttendanceService.process_recognition_event()` — for late arrivals
+- `tasks.email_digest` Celery task — for daily digest at 18:00
+
+SMTP uses `smtplib` in a `ThreadPoolExecutor` (non-blocking). Supports STARTTLS (port 587) and SSL (port 465).
+
+---
+
+## Camera Quality Profiles
+
+`edge/config/camera_config.yaml` has 5 profiles. Uncomment the matching one:
+
+| Profile | Type | `recognition_threshold` | `liveness_threshold` | `superres` | `enhance_faces` |
+|---|---|---|---|---|---|
+| 1 (active) | V380 / budget WiFi 640p | 0.42 | 0.38 | true | true |
+| 2 | Mid-range IP 1080p | 0.55 | 0.48 | false | true |
+| 3 | Quality camera (Axis, Bosch) | 0.65 | 0.55 | false | false |
+| 4 | USB webcam (close range) | 0.60 | 0.50 | false | false |
+| 5 | Phone IP camera | 0.50 | 0.44 | true | true |
+
+Restart edge node after changing profile: `docker compose restart edge_node`
+
+---
+
+## Standalone Mode (edge_standalone.py)
+
+Full-featured single-file edge node for Windows without Docker:
+
+| Feature | Old (before update) | New |
+|---|---|---|
+| Anti-spoof | Hardcoded `is_live=True` | ONNX model + heuristic fallback |
+| Multi-frame voting | None (single frame) | VoteBuffer with EMA centroid tracking |
+| GPU support | CPU only | CUDA / DirectML / CPU auto-detect |
+| Face enhancement | None | Bilateral + unsharp + CLAHE |
+| Neural SR | None | FSRCNN x2 (with Lanczos fallback) |
+| Reconnect on drop | Log and stop | Exponential backoff (3 s → 30 s) |
+| Embedding resync | Never | Every 60 s from backend |
+| Camera types | RTSP + webcam | + HTTP MJPEG (DroidCam, IP Webcam app) |
+| Resolution logging | None | Logs WxH @ fps on connect + warns if < 640 wide |
+
+Run in conda env that has `opencv-contrib-python`:
+```powershell
+$env:CAMERA_SRC="rtsp://admin:admin@192.168.x.x:554/stream1"
+C:\Users\ANTS-Pc\.conda\envs\mouza_processor_venv\python.exe edge_standalone.py
 ```
 
 ---
@@ -132,23 +261,26 @@ Frame arrives from RTSPReader
 | unknown_person / spoof_attempt events never reached backend | `event_publisher.py` | Extended to send all 3 event types |
 | `employee_id` required in schema but None for unknown/spoof | `schemas/attendance.py` | Made `employee_id` optional |
 | Unknown person alert only fired after hours | `attendance_service.py` | Always fire `unknown_person` alert |
-| DB alerts never committed (rolled back on request end) | `attendance_service.py` | Added `await db.commit()` after spoof path and `_handle_unknown()` |
+| DB alerts never committed | `attendance_service.py` | Added `await db.commit()` after spoof/unknown paths |
 | `snapshot_url` missing from `unknown_person` event | `frame_processor.py` | Added `snap` to event dict |
 | Unknown/spoof tracks not cooled down → alert spam | `frame_processor.py` | Set `_cooldown[track_id]` for all event types |
-| `_get_current_shift()` could return wrong/deactivated shift | `attendance_service.py` | Added `Shift.is_active` filter + `order_by(effective_from.desc())` |
+| `_get_current_shift()` returned wrong/deactivated shift | `attendance_service.py` | Added `Shift.is_active` filter + `order_by(effective_from.desc())` |
 | Same-day shift reassignment: old + new both match | `attendance_service.py` | Changed `effective_to >= day` → `effective_to > day` |
 | Frontend `NEXT_PUBLIC_*` not baked in at build time | `docker-compose.yml` | Moved from `environment` to `build.args` |
-| ENVIRONMENT=development enabled verbose SQL logging | `.env` | Changed to `production` + downgraded secret check to warnings |
 | Port 80 conflict with Docker Desktop on Windows | `docker-compose.yml` | Changed nginx to `8080:80` |
-| ALLOWED_ORIGINS didn't include port 8080 | `.env` | Added `ALLOWED_ORIGINS=http://localhost:8080` |
-| Anti-spoof in pass-through mode (no model) | `anti_spoof.py` | Downloaded MiniFASNet ONNX + implemented heuristic fallback |
-| Single-frame recognition flip-flop | `frame_processor.py` | Multi-frame temporal voting engine (7 frames, majority vote) |
-| Single top-1 FAISS unstable for varied photos | `faiss_search.py` | Top-K matching with per-employee mean similarity aggregation |
-| Face crops cutting off heads (tight YOLO bbox) | `frame_processor.py` | 30% padding via `_crop_padded()` |
-| Low similarity scores from small faces | `arcface.py` | `det_size` increased 640→960 |
-| Alerts polled every 15s (stale) | `AlertsFeed.tsx` | Real-time WebSocket `/ws/alerts/` + 10s fallback poll |
-| Live feed showed only check-in/out (missed unknown/spoof) | `LiveEventFeed.tsx` | Extended to show all event types with color coding |
-| Snapshot files accumulated forever (disk full) | `tasks.py` + `celery_app.py` | `purge_snapshots` task: deletes files >7 days, runs nightly at 03:00 |
+| ALLOWED_ORIGINS didn't include port 8080 | `.env` | Added `http://localhost:8080` |
+| **Standalone: anti-spoof bypassed** | `edge_standalone.py` | Full rewrite — ONNX model + heuristic; removed hardcoded `is_live=True` |
+| **Standalone: no multi-frame voting** | `edge_standalone.py` | Added `VoteBuffer` with EMA centroid pseudo-tracking |
+| **Standalone: GPU not used** | `edge_standalone.py` | Added `detect_gpu()` — CUDA / DirectML / CPU |
+| **Standalone: no reconnect on stream drop** | `edge_standalone.py` | Exponential backoff reconnect loop |
+| **Standalone: embeddings never resynced** | `edge_standalone.py` | Resync every 60 s from backend |
+| **Anti-spoof weak on screen replay (H.264)** | `anti_spoof.py` | Added luminance patch variance cue (25% weight) |
+| **Anti-spoof spoof threshold too lenient** | `frame_processor.py` | Fires at `majority - 1` frames (not `majority`) |
+| **No neural SR on face crops** | `frame_processor.py`, `edge_standalone.py` | FSRCNN x2 via `superres.py` before ArcFace embed |
+| **No email notifications** | `notification_service.py` | Full SMTP implementation (TLS, HTML templates) |
+| **`email_digest` was a stub** | `tasks.py` | Implemented: DB query → `NotificationService.notify_digest()` |
+| **Alert emails not sent** | `alert_service.py` | Added `_notify_email()` wired for high-severity types |
+| **Late arrival not emailed** | `attendance_service.py` | Added `NotificationService().notify_late()` call |
 
 ---
 
@@ -164,68 +296,43 @@ verify_password(p, h)   # → bool
 
 ### JWT flow
 ```
-POST /auth/login → validate bcrypt → create_access_token(sub, tenant_id, role) → return
-GET  /any        → get_current_user dependency → decode_token(jwt) → CurrentUser dataclass
+POST /auth/login → validate bcrypt → create_access_token(sub, tenant_id, role) → return JWT
+GET  /any        → get_current_user → decode_token(jwt) → CurrentUser dataclass
 ```
 `decode_token` validates signature + expiry without a DB call.
 
 ### Edge token
-`verify_edge_token` uses `secrets.compare_digest` (constant-time). In dev (`EDGE_TOKEN == ""`), check is skipped.
-
-### Rate limiter
-`RateLimitMiddleware` is in-process — one bucket dict per worker. Auth endpoints capped at 30 req/min/IP; others at 200 req/min/IP.
+`verify_edge_token` uses `secrets.compare_digest` (constant-time). In dev (`EDGE_TOKEN == ""`), check skipped.
 
 ---
 
 ## GPU Detection Flow
 
 ```
-DEVICE env var → use it directly
+DEVICE env var → use directly
 Otherwise:
   ORT available providers?
-    CUDAExecutionProvider  → NVIDIA
-    ROCMExecutionProvider  → AMD
-    OpenVINOExecutionProvider → Intel
-    DmlExecutionProvider   → DirectML (Windows)
-  torch.xpu available?     → Intel IPEX
-  fallback                 → CPU
+    CUDAExecutionProvider       → NVIDIA
+    ROCMExecutionProvider       → AMD
+    OpenVINOExecutionProvider   → Intel
+    DirectMLExecutionProvider   → Windows GPU (standalone only)
+  fallback                      → CPU
 
-Result cached in _CACHED (module-level singleton)
+Result cached as _CACHED (module-level singleton, re-used by all models)
 ```
 
-Set `DEVICE=cuda` in `.env` for NVIDIA. The edge node logs which providers are active on startup.
+Both the anti-spoof ONNX session and InsightFace use the same ORT providers from `detect_gpu()`.
 
 ---
 
-## Anti-Spoof Model Details
+## Celery Scheduled Tasks
 
-**Model:** `hairymax/Face-AntiSpoofing` — MiniFASNet-style CNN trained on CelebA-Spoof dataset
-- Input: `[1, 3, 128, 128]` float32, **RGB**, letterboxed, pixels / 255
-- Output: `[1, 2]` logits → softmax → **index 0 = P(live)**, index 1 = P(spoof)
-- Face crop expanded **1.5× around bbox** before preprocessing (matches upstream training crop)
-- Accuracy: ~92.9%, AUC-ROC ~0.987 on CelebA-Spoof binary classification
-- Model file: `edge/weights/antispoof_128.onnx` — mounted as volume, swappable without rebuild
-
-**Fallback heuristic** (when no model file): multi-cue texture analysis
-- Laplacian variance (40%) + Sobel gradient energy (30%) + HSV saturation std (20%) + FFT high-freq ratio (10%)
-- Threshold auto-lowered to 0.35 in heuristic mode; model mode uses 0.55
-
----
-
-## Recognition Tuning Reference
-
-All in `edge/config/camera_config.yaml` — restart edge_node to apply (no rebuild):
-
-| Parameter | Default | Effect |
+| Task | Schedule | What it does |
 |---|---|---|
-| `recognition_threshold` | 0.50 | Min mean similarity to confirm a match. Raise → fewer false matches. Lower → more recall. |
-| `liveness_threshold` | 0.55 | Min P(live) from anti-spoof model. Lower → fewer false spoof blocks. |
-| `min_det_score` | 0.55 | Skip face crops below this detection quality (turned/blurry). |
-| `vote_window` | 7 | Frames to buffer per track before deciding. Higher → more stable but slower. |
-| `min_votes` | 4 | Min good frames needed before decision is made. |
-| `vote_ttl_seconds` | 5 | Clear vote buffer if person not seen for this many seconds. |
-| `cooldown_seconds` | 300 | Suppress re-recognition of same person for this long. |
-| `faiss_top_k` | 5 | Neighbours to retrieve per query. Higher = more stable for employees with many photos. |
+| `mark_absentees` | 23:30 daily | Creates `absent` records for active employees with no log today |
+| `apply_retention` | 02:00 daily | Deletes `RecognitionEvent` DB rows older than `EVENT_RETENTION_DAYS` (default 90 days) |
+| `purge_snapshots` | 03:00 daily | Deletes snapshot image files older than 7 days from `/app/snapshots/` |
+| `email_digest` | 18:00 daily | Queries today's attendance stats → sends HTML digest email via SMTP |
 
 ---
 
@@ -236,21 +343,27 @@ All in `edge/config/camera_config.yaml` — restart edge_node to apply (no rebui
 3. Add Pydantic schema to `backend/app/schemas/*.py` if needed
 4. Register router in `main.py` if new file
 5. Add TypeScript method to `frontend/src/lib/api.ts`
-6. Use from page component
 
 ## How to Add a New Alert Type
 
 1. Add to `SEVERITY` dict in `alert_service.py`
-2. Call `await self.alerts.fire(tenant_id, "new_type", message, ...)` from `attendance_service.py`
-3. Add icon to `ICONS` dict in `AlertsFeed.tsx`
-4. Add to alert type filters in `alerts/page.tsx` and `security-alerts/page.tsx`
+2. Call `await self.alerts.fire(tenant_id, "new_type", message, ...)` from service
+3. Add email handler in `alert_service._notify_email()` if high-severity
+4. Add icon to `ICONS` dict in `AlertsFeed.tsx`
+5. Add to alert type filters in `alerts/page.tsx` and `security-alerts/page.tsx`
 
-## How to Add a New Dashboard Page
+## How to Add a New Email Notification
 
-1. Create `frontend/src/app/dashboard/<name>/page.tsx`
-2. Import and use `DashboardShell` and `useRole`
-3. Add nav entry to `NAV` array in `DashboardShell.tsx`
-4. If admin-only: use `{can("admin") && ...}` pattern
+1. Add method to `NotificationService` in `notification_service.py`
+2. Use `await self._send_all(subject, body_text, body_html)` — sends email + webhooks
+3. Use `_html_alert(title, color, lines)` helper for consistent HTML template
+4. Call from the appropriate service method
+
+## How to Add a Camera Quality Profile
+
+1. Add a new commented block to `edge/config/camera_config.yaml`
+2. Document thresholds: `recognition_threshold`, `liveness_threshold`, `min_det_score`, `enhance_faces`, `superres`
+3. Update the profiles table in `README.md` and this file
 
 ## How to Support a New GPU
 
@@ -258,18 +371,6 @@ All in `edge/config/camera_config.yaml` — restart edge_node to apply (no rebui
 2. Add detection logic to `edge/src/utils/gpu.py`
 3. Create `docker-compose.prod.<name>.yml` override with device mounts
 4. Add to `deploy.sh` / `deploy.bat` GPU detection block
-5. Add `make deploy-<name>` target to `Makefile`
-
----
-
-## Celery Scheduled Tasks
-
-| Task | Schedule | What it does |
-|---|---|---|
-| `mark_absentees` | 23:30 daily | Creates `absent` attendance records for employees with no log today |
-| `apply_retention` | 02:00 daily | Deletes `RecognitionEvent` DB rows older than `EVENT_RETENTION_DAYS` (default 90) |
-| `purge_snapshots` | 03:00 daily | Deletes snapshot image files older than 7 days from `/app/snapshots/` |
-| `email_digest` | 18:00 daily | Placeholder — implement SMTP digest here |
 
 ---
 
@@ -279,7 +380,7 @@ All in `edge/config/camera_config.yaml` — restart edge_node to apply (no rebui
 # Start (Windows)
 start.bat          # First run builds images; subsequent runs start in ~10s
 
-# Stop (Windows)
+# Stop
 stop.bat
 
 # Watch logs
@@ -294,16 +395,20 @@ docker compose up -d --build backend
 
 # Re-seed database
 docker compose exec backend python seed.py
+
+# Run standalone (Windows, no Docker)
+$env:CAMERA_SRC="0"
+C:\Users\ANTS-Pc\.conda\envs\mouza_processor_venv\python.exe edge_standalone.py
 ```
 
-### Threshold changes (no rebuild)
+### Threshold changes (no rebuild needed)
 Edit `edge/config/camera_config.yaml`, then:
 ```bash
-docker compose restart edge_node backend
+docker compose restart edge_node
 ```
 
 ### Frontend hot-reload
-The production compose uses a built Next.js image — no hot-reload. For frontend development, run directly:
+Production compose uses a built Next.js image — no hot-reload. For frontend dev:
 ```bash
 cd frontend && npm run dev
 # Set NEXT_PUBLIC_API_URL=http://localhost:8080 in .env.local
@@ -313,16 +418,18 @@ cd frontend && npm run dev
 
 ## Known Limitations
 
-1. **Rate limiter is in-process** — does not share state across multiple uvicorn workers. For multi-worker prod deployments, use Redis-backed rate limiting (e.g. `slowapi` with Redis storage).
+1. **Rate limiter is in-process** — does not share state across multiple uvicorn workers. For multi-worker prod deployments, use Redis-backed rate limiting (e.g. `slowapi` with Redis).
 
-2. **Celery tasks are fire-and-forget** — no dead-letter queue. Failed tasks are logged but not retried automatically. Add `autoretry_for` decorators for production reliability.
+2. **Celery tasks are fire-and-forget** — no dead-letter queue. Failed tasks are logged but not retried. Add `autoretry_for` decorators for production reliability.
 
-3. **SMTP password stored in plaintext** — `alert_configs.smtp_password` is not encrypted. For production, use an environment variable or secrets manager.
+3. **SMTP password in plaintext .env** — for production, use a secrets manager or Docker secrets instead of `.env`.
 
 4. **Single FAISS index per edge node** — reloaded in full every 60 s. For tenants with 10,000+ employees, consider incremental updates or a persistent FAISS index file.
 
-5. **WebSocket creates a new Redis connection per client** — acceptable for small deployments. For high concurrency, share a single pub/sub connection from `app.state`.
+5. **WebSocket creates a new Redis connection per client** — acceptable for small deployments. For high concurrency, share a single pub/sub connection via `app.state`.
 
-6. **Anti-spoof model not trained on all attack types** — MiniFASNet (CelebA-Spoof) detects print and replay attacks well, but 3D mask attacks may pass. For high-security deployments, integrate a more comprehensive liveness model.
+6. **Anti-spoof limited to print and replay attacks** — the MiniFASNet model (CelebA-Spoof) detects print and screen replay well but 3D silicone mask attacks may pass. For very high-security deployments, integrate a depth sensor or a more comprehensive liveness model.
 
-7. **Snapshot purge runs on celery_worker** — worker must have the `/app/snapshots` volume mounted (already configured in `docker-compose.yml`). If the worker is on a different host, snapshot cleanup must be handled externally.
+7. **FSRCNN SR requires opencv-contrib-python** — plain `opencv-python` does not include `dnn_superres`. If only `opencv-python` is installed, SR silently falls back to Lanczos bicubic. Both `frame_processor.py` and `edge_standalone.py` handle this gracefully.
+
+8. **Snapshot purge runs on celery_worker** — worker must have the `/app/snapshots` volume mounted (already configured in `docker-compose.yml`). On multi-host deployments, handle snapshot cleanup externally.

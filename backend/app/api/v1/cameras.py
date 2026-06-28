@@ -58,26 +58,42 @@ def _capture_camera_frame(rtsp_url: str) -> bytes:
         except Exception as exc:
             raise RuntimeError(f"Could not fetch snapshot ({shot_url}): {exc}") from exc
 
-    capture = cv2.VideoCapture(
-        rtsp_url,
-        cv2.CAP_FFMPEG,
-        [
-            cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 5000,
-            cv2.CAP_PROP_READ_TIMEOUT_MSEC, 5000,
-        ],
+    import os as _os
+    # Apply the same H.265-compatible FFmpeg flags used by the edge node.
+    # Without these, Hikvision DVR streams (H.265) fail to open or return
+    # a blank frame because FFmpeg can't locate the codec headers in time.
+    _os.environ.setdefault(
+        "OPENCV_FFMPEG_CAPTURE_OPTIONS",
+        "rtsp_transport;tcp|analyzeduration;5000000|probesize;5000000",
     )
-    try:
-        if not capture.isOpened():
-            raise RuntimeError("Could not connect to the camera stream")
-        ok, frame = capture.read()
-        if not ok or frame is None:
-            raise RuntimeError("Connected, but could not read a camera frame")
-        encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
-        if not encoded:
-            raise RuntimeError("Could not encode the camera frame")
-        return jpeg.tobytes()
-    finally:
-        capture.release()
+
+    for transport in ("tcp", "udp"):
+        _os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
+            f"rtsp_transport;{transport}|analyzeduration;5000000|probesize;5000000"
+        )
+        capture = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+        capture.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, 10000)
+        capture.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, 8000)
+        try:
+            if not capture.isOpened():
+                capture.release()
+                continue
+            ok, frame = capture.read()
+            if not ok or frame is None:
+                capture.release()
+                continue
+            encoded, jpeg = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 80])
+            if not encoded:
+                capture.release()
+                continue
+            return jpeg.tobytes()
+        finally:
+            capture.release()
+
+    raise RuntimeError(
+        "Could not connect to the camera stream. "
+        "Check the RTSP URL, credentials, and that port 554 is reachable."
+    )
 
 
 @router.get("")
