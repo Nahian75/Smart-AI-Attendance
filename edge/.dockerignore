@@ -1,0 +1,16 @@
+# SDK .so files are mounted as a volume at runtime (docker-compose: ./edge/sdk:/app/sdk)
+# Excluding them from the build context avoids symlink/special-file errors during COPY
+sdk/
+
+# Model weights are downloaded at build time or volume-mounted — no need to COPY
+# Exception: face_landmarker.task may be pre-placed manually
+weights/*.pt
+weights/*.onnx
+weights/*.pb
+
+# Python cache
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/

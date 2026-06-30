@@ -49,9 +49,9 @@ function ChangePasswordModal({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-sm">
-        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b dark:border-gray-700">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className="glass-heavy rounded-2xl w-full max-w-sm">
+        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-white/30 dark:border-white/[0.07]">
           <h3 className="text-base font-semibold text-gray-900 dark:text-white flex items-center gap-2">
             <KeyRound size={16} className="text-blue-600" /> Change Password
           </h3>
@@ -142,13 +142,13 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   }
 
   return (
-    <div className="flex min-h-screen bg-gray-50 dark:bg-gray-900">
+    <div className="flex min-h-screen">
       {/* ── Sidebar ── */}
-      <aside className="w-52 bg-white dark:bg-gray-800 border-r dark:border-gray-700 p-3 flex flex-col gap-0.5 flex-shrink-0">
+      <aside className="w-52 glass-sidebar p-3 flex flex-col gap-0.5 flex-shrink-0">
         <div className="flex items-center gap-2 px-2 py-3 mb-1 font-semibold text-gray-900 dark:text-white">
           <ScanEye className="text-blue-600" size={20} />
           <span className="font-bold tracking-tight">
-            Arg<span className="text-blue-600">us</span>
+            Ocu<span className="text-blue-600">lus</span>
           </span>
         </div>
 
@@ -162,10 +162,10 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         {/* Nav links */}
         {NAV.map((n) => (
           <button key={n.label} onClick={() => router.push(n.href)}
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-colors ${
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-all ${
               isActive(n.href)
-                ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium"
-                : "text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white"
+                ? "glass-active text-blue-700 dark:text-blue-300 font-medium"
+                : "text-gray-500 dark:text-gray-400 hover:bg-white/40 dark:hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-white"
             }`}>
             <n.icon size={15} />
             {n.label}
@@ -175,10 +175,10 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         {/* Admin link — only visible to admin+ */}
         {can("admin") && (
           <button onClick={() => router.push("/dashboard/admin")}
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-colors ${
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-all ${
               isActive("/dashboard/admin")
-                ? "bg-blue-50 dark:bg-blue-900/30 text-blue-700 dark:text-blue-300 font-medium"
-                : "text-gray-500 dark:text-gray-400 hover:bg-gray-50 dark:hover:bg-gray-700 hover:text-gray-900 dark:hover:text-white"
+                ? "glass-active text-blue-700 dark:text-blue-300 font-medium"
+                : "text-gray-500 dark:text-gray-400 hover:bg-white/40 dark:hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-white"
             }`}>
             <Settings size={15} />
             Admin
@@ -186,10 +186,10 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         )}
 
         {/* Footer */}
-        <div className="mt-auto pt-2 border-t dark:border-gray-700 space-y-0.5">
+        <div className="mt-auto pt-2 border-t border-white/40 dark:border-white/[0.06] space-y-0.5">
           <button onClick={() => setShowPwModal(true)}
             className="flex items-center gap-2 px-3 py-2 text-sm text-gray-500 dark:text-gray-400
-                       hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg w-full transition-colors">
+                       hover:bg-white/40 dark:hover:bg-white/[0.05] rounded-lg w-full transition-all">
             <KeyRound size={15} /> Change Password
           </button>
 
@@ -200,7 +200,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
 
           <button onClick={() => { clearSession(); router.push("/login"); }}
             className="flex items-center gap-2 px-3 py-2 text-sm text-gray-500 dark:text-gray-400
-                       hover:bg-gray-50 dark:hover:bg-gray-700 rounded-lg w-full transition-colors">
+                       hover:bg-white/40 dark:hover:bg-white/[0.05] rounded-lg w-full transition-all">
             <LogOut size={15} /> Sign out
           </button>
         </div>

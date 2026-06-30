@@ -10,8 +10,8 @@ from .detection.yolo_detector import YOLODetector
 from .recognition.arcface import ArcFaceRecognizer, probe_camera_resolution, auto_det_size
 from .recognition.anti_spoof import AntiSpoofChecker
 from .recognition.mask_detector import MaskDetector
+from .recognition.mediapipe_align import MediaPipeFaceAligner
 from .recognition.faiss_search import FaissSearch
-from .camera.rtsp_reader import RTSPReader
 from .camera.universal_reader import UniversalCameraReader
 from .camera.mjpeg_server import MJPEGServer
 from .pipeline.frame_processor import FrameProcessor
@@ -112,7 +112,8 @@ async def load_embeddings(backend_url: str, tenant_id: str, token: str) -> tuple
         return np.zeros((0, 512), dtype=np.float32), [], {}
     try:
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.get(f"{backend_url}/api/v1/enrollment/export",
+            r = await c.get(f"{backend_url}/api/v1/enrollment/export-edge",
+                            params={"tenant_id": tenant_id},
                             headers={"Authorization": f"Bearer {token}"})
             r.raise_for_status()
             data = r.json()
@@ -181,6 +182,11 @@ def _camera_cfg(cam: dict, global_cfg: dict) -> dict:
     Profiles in camera_profiles[] are matched by checking whether any keyword
     in their `match` list appears (case-insensitive) in the camera name or URL.
     First matching profile wins; unmatched cameras use the global defaults.
+
+    cctv_mode is auto-detected from the camera's direction and camera_role if
+    not explicitly set in a profile:
+      - interior / meeting_room / ceiling  →  cctv_mode=True
+      - entrance / exit / entrance_gate / reception  →  cctv_mode=False
     """
     cfg = dict(global_cfg)  # shallow copy so we don't mutate the global
     name = (cam.get("name") or "").lower()
@@ -197,6 +203,19 @@ def _camera_cfg(cam: dict, global_cfg: dict) -> dict:
                 cfg.get("superres"), cfg.get("recognition_threshold", 0),
             )
             break
+
+    # Auto-detect cctv_mode if not explicitly set by a profile
+    if "cctv_mode" not in cfg:
+        direction = (cam.get("direction") or "").lower()
+        role      = (cam.get("camera_role") or "").lower()
+        cctv_roles = {"general", "meeting_room"}
+        cctv_dirs  = {"interior"}
+        cfg["cctv_mode"] = direction in cctv_dirs or role in cctv_roles
+
+    log.info("[%s] mode=%s direction=%s role=%s",
+             cam.get("id"),
+             "CCTV/overhead" if cfg["cctv_mode"] else "frontal/entrance",
+             cam.get("direction"), cam.get("camera_role"))
     return cfg
 
 
@@ -204,10 +223,11 @@ def _start_reader(cam: dict, processor: FrameProcessor, cfg: dict,
                   loop: asyncio.AbstractEventLoop) -> UniversalCameraReader:
     def make_cb(proc):
         def cb(frame, ts):
-            # Always push to the MJPEG live feed from the dispatch thread.
             proc.push_mjpeg(frame)
-            # Only schedule inference if the processor is idle.
+            # Claim the busy slot here (dispatch thread) so there is no TOCTOU
+            # window between the check and the coroutine actually setting _busy.
             if not proc._busy:
+                proc._busy = True
                 asyncio.run_coroutine_threadsafe(proc.process(frame, ts), loop)
         return cb
 
@@ -229,6 +249,8 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
                              anti_spoof: AntiSpoofChecker, face_search: FaissSearch,
                              id_to_name: dict, snapshot_dir: str,
                              loop: asyncio.AbstractEventLoop,
+                             mask_detector: MaskDetector | None = None,
+                             face_aligner: MediaPipeFaceAligner | None = None,
                              interval: int = 60) -> None:
     """Reload camera list from backend every `interval` seconds.
     Starts new cameras and restarts ones whose URL changed."""
@@ -258,7 +280,7 @@ async def camera_watch_loop(backend_url: str, token_ref: list, fallback: list,
                         config=cam_cfg, detector=make_detector(), recognizer=recognizer,
                         anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
                         snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
-                        mask_detector=mask_detector,
+                        mask_detector=mask_detector, face_aligner=face_aligner,
                     )
                     processors[cam_id] = proc
                     readers[cam_id] = _start_reader(cam, proc, cam_cfg, loop)
@@ -351,8 +373,13 @@ async def main():
     )
 
     face_search = FaissSearch(
-        threshold=cfg.get("recognition_threshold", 0.82),
+        threshold=float(os.getenv("RECOGNITION_THRESHOLD", cfg.get("recognition_threshold", 0.45))),
         top_k=cfg.get("faiss_top_k", 5),
+    )
+
+    face_aligner = MediaPipeFaceAligner(
+        max_yaw=float(cfg.get("mp_max_yaw", 40.0)),
+        max_pitch=float(cfg.get("mp_max_pitch", 30.0)),
     )
     if len(ids):
         face_search.build(embs, ids)
@@ -370,7 +397,7 @@ async def main():
 
     publisher = EventPublisher(redis_url, backend_url, tenant_id)
     publisher.set_token(token_ref[0])
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     readers: dict[str, UniversalCameraReader] = {}
     processors: dict[str, FrameProcessor] = {}
@@ -382,7 +409,7 @@ async def main():
             config=cam_cfg, detector=_make_detector(), recognizer=recognizer,
             anti_spoof=anti_spoof, face_search=face_search, publisher=publisher,
             snapshot_dir=snapshot_dir, mjpeg_server=mjpeg, id_to_name=id_to_name,
-            mask_detector=mask_detector,
+            mask_detector=mask_detector, face_aligner=face_aligner,
         )
         processors[cam["id"]] = proc
         readers[cam["id"]] = _start_reader(cam, proc, cam_cfg, loop)
@@ -395,12 +422,15 @@ async def main():
                 readers, processors, cfg, mjpeg, publisher,
                 _make_detector, recognizer, anti_spoof, face_search,
                 id_to_name, snapshot_dir, loop,
+                mask_detector=mask_detector,
+                face_aligner=face_aligner,
             ),
             embedding_watch_loop(backend_url, tenant_id, token_ref, face_search, id_to_name),
         )
     finally:
         for r in readers.values():
             r.stop()
+        face_aligner.close()
         await publisher.close()
 
 

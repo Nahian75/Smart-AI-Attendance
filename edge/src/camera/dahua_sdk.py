@@ -99,7 +99,7 @@ class DahuaSDKCapture:
         self._real_handle: LLONG = LLONG(0)
         self._running:     bool = False
         self._on_frame:    Callable | None = None
-        self._chunk_q:     queue.Queue[bytes] = queue.Queue(maxsize=60)
+        self._chunk_q:     queue.Queue[bytes] = queue.Queue(maxsize=4)
         self._cb_ref:      REAL_DATA_CALLBACK | None = None
         self._thread:      threading.Thread | None = None
 
@@ -182,8 +182,14 @@ class DahuaSDKCapture:
         def _cb(handle, data_type, buf, buf_size, user):
             if not self._running:
                 return
+            raw = bytes(buf[:buf_size])
+            # Drop the OLDEST chunk when full to maintain low latency.
+            if self._chunk_q.full():
+                try:
+                    self._chunk_q.get_nowait()
+                except queue.Empty:
+                    pass
             try:
-                raw = bytes(buf[:buf_size])
                 self._chunk_q.put_nowait(raw)
             except queue.Full:
                 pass
@@ -202,7 +208,10 @@ class DahuaSDKCapture:
             return False
 
         self._real_handle = handle
-        self._sdk.CLIENT_SetRealDataCallBackEx(handle, self._cb_ref, 0, 0)
+        # CLIENT_SetRealDataCallBackEx2 matches our 5-param CFUNCTYPE (LLONG user).
+        # The older Ex variant uses LONG (32-bit) for user, causing stack corruption
+        # on 64-bit Linux when the callback fires.
+        self._sdk.CLIENT_SetRealDataCallBackEx2(handle, self._cb_ref, 0, 0)
         return True
 
     def _logout(self) -> None:

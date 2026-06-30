@@ -23,7 +23,7 @@ export default function ShiftComplianceTable() {
   }, []);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+    <div className="glass rounded-xl">
       <div className="px-4 py-3 border-b dark:border-gray-700 text-sm font-medium text-gray-900 dark:text-white">
         Shift compliance — this week
       </div>

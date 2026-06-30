@@ -74,7 +74,7 @@ export default function LiveEventFeed() {
   }, []);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+    <div className="glass rounded-xl">
       <div className="px-4 py-3 border-b dark:border-gray-700 flex items-center justify-between">
         <span className="text-sm font-medium text-gray-900 dark:text-white">Live feed</span>
         <span className="flex items-center gap-1.5 text-xs text-brand">

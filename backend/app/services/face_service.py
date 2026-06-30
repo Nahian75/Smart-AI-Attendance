@@ -7,6 +7,7 @@ that are pushed to edge nodes, plus an HR-side verify/enroll path.
 import uuid
 from datetime import datetime, timezone
 import numpy as np
+import cv2
 from sqlalchemy import select, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -84,15 +85,55 @@ class FaceEnrollmentService:
             raise ValueError("Invalid image file provided.")
 
         # Run CPU-bound inference in a thread so the event loop stays responsive
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         with ThreadPoolExecutor(max_workers=1) as pool:
             faces = await loop.run_in_executor(pool, self.embedder.detect_and_embed, img)
 
         if not faces:
             raise ValueError("No face detected in the uploaded image. Please provide a clear, well-lit, front-facing photo.")
 
-        bbox, embedding, det_score = faces[0]
-        return await self.enroll_embeddings(employee_id, tenant_id, [embedding], ["frontal"])
+        bbox, base_embedding, det_score = faces[0]
+
+        # ── Angle augmentation ─────────────────────────────────────────────
+        # Generate embeddings at ±15° and ±30° in-plane rotations of the
+        # face crop. Storing these alongside the frontal embedding means FAISS
+        # can match faces seen from slightly different angles (CCTV tilt,
+        # person turning head) without re-enrollment.
+        #
+        # Why rotations and not affine warps: InsightFace's SCRFD+ArcFace
+        # pipeline re-aligns the face internally. Rotating the input image
+        # changes the apparent head pose, so the resulting embedding
+        # approximates what ArcFace would produce for a rotated real face.
+        embeddings = [base_embedding]
+        angles_labels = ["frontal"]
+        try:
+            face_cx = int((bbox[0] + bbox[2]) / 2)
+            face_cy = int((bbox[1] + bbox[3]) / 2)
+            face_r  = max(int((bbox[2] - bbox[0]) * 0.8), int((bbox[3] - bbox[1]) * 0.8))
+            # Crop a square region around the face for rotation (avoids corner artefacts)
+            fh, fw = img.shape[:2]
+            x1 = max(0, face_cx - face_r)
+            y1 = max(0, face_cy - face_r)
+            x2 = min(fw, face_cx + face_r)
+            y2 = min(fh, face_cy + face_r)
+            face_region = img[y1:y2, x1:x2]
+
+            for angle, label in [(-30, "left_30"), (-15, "left_15"),
+                                  (15, "right_15"), (30, "right_30")]:
+                h2, w2 = face_region.shape[:2]
+                M = cv2.getRotationMatrix2D((w2 / 2, h2 / 2), angle, 1.0)
+                rotated = cv2.warpAffine(face_region, M, (w2, h2),
+                                         borderMode=cv2.BORDER_REPLICATE)
+                aug_faces = self.embedder.detect_and_embed(rotated)
+                if aug_faces:
+                    _, aug_emb, aug_score = aug_faces[0]
+                    if aug_score >= 0.3:
+                        embeddings.append(aug_emb)
+                        angles_labels.append(label)
+        except Exception:
+            pass  # augmentation failure is non-fatal — frontal embedding still enrolled
+
+        return await self.enroll_embeddings(employee_id, tenant_id, embeddings, angles_labels)
 
     async def match(self, embedding: list[float], tenant_id: uuid.UUID,
                     threshold: float = 0.82) -> tuple[uuid.UUID | None, float]:

@@ -33,23 +33,156 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-gray-50 dark:bg-gray-900">
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-8 w-96 shadow-sm">
-        <h1 className="text-2xl font-bold tracking-tight mb-1">
-          <span className="text-gray-900 dark:text-white">Arg</span><span className="text-blue-600">us</span>
-        </h1>
-        <p className="text-xs font-medium tracking-widest uppercase text-gray-400 dark:text-gray-500 mb-6">
-          AI Attendance Platform
+    <div className="min-h-screen flex">
+      {/* ── Left branding panel ── */}
+      <div className="hidden lg:flex w-1/2 flex-col justify-between p-12
+                      bg-gradient-to-br from-slate-900 via-blue-950 to-indigo-950 relative overflow-hidden">
+
+        {/* Background glow orbs */}
+        <div className="absolute top-1/4 left-1/4 w-96 h-96 bg-blue-500/20 rounded-full blur-3xl pointer-events-none" />
+        <div className="absolute bottom-1/4 right-1/4 w-80 h-80 bg-indigo-500/15 rounded-full blur-3xl pointer-events-none" />
+
+        {/* Logo */}
+        <div className="relative z-10 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-blue-500/20 border border-blue-400/30 flex items-center justify-center">
+            <svg viewBox="0 0 24 24" fill="none" className="w-6 h-6 text-blue-400" stroke="currentColor" strokeWidth={1.5}>
+              <circle cx="12" cy="12" r="3" fill="currentColor" />
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+          </div>
+          <span className="text-white font-bold text-xl tracking-tight">
+            Ocu<span className="text-blue-400">lus</span>
+          </span>
+        </div>
+
+        {/* Hero text */}
+        <div className="relative z-10 space-y-6">
+          <div>
+            <h1 className="text-5xl font-bold text-white leading-tight tracking-tight">
+              Intelligent<br />
+              <span className="text-blue-400">Vision</span><br />
+              Secure Operation
+            </h1>
+            <p className="mt-4 text-slate-400 text-lg leading-relaxed max-w-sm">
+              Real-time face recognition, behavioural analytics, and smart alerting — all in one unified platform.
+            </p>
+          </div>
+
+          {/* Feature pills */}
+          <div className="flex flex-wrap gap-2">
+            {["Face Recognition", "Liveness Detection", "Bag Detection", "Live Alerts", "Shift Management"].map(f => (
+              <span key={f}
+                className="text-xs px-3 py-1.5 rounded-full bg-white/5 border border-white/10 text-slate-300">
+                {f}
+              </span>
+            ))}
+          </div>
+        </div>
+
+        {/* Footer tagline */}
+        <p className="relative z-10 text-slate-600 text-xs tracking-widest uppercase">
+          Always Watching. Always Accurate.
         </p>
-        <input className="w-full border dark:border-gray-600 rounded-lg px-3 py-2 mb-3 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400"
-               value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-        <input className="w-full border dark:border-gray-600 rounded-lg px-3 py-2 mb-4 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white placeholder-gray-400" type="password"
-               value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" />
-        {error && <p className="text-sm text-red-600 mb-3">{error}</p>}
-        <button onClick={submit} disabled={loading}
-                className="w-full bg-brand text-white rounded-lg py-2 text-sm font-medium hover:bg-brand-dark disabled:opacity-50">
-          {loading ? "Signing in…" : "Sign in"}
-        </button>
+      </div>
+
+      {/* ── Right login panel ── */}
+      <div className="flex-1 flex flex-col items-center justify-center px-6 py-12
+                      bg-gradient-to-br from-slate-50 via-blue-50/30 to-indigo-50/40
+                      dark:from-slate-950 dark:via-blue-950/40 dark:to-indigo-950/30">
+
+        {/* Mobile logo (shown only on small screens) */}
+        <div className="flex items-center gap-2 mb-10 lg:hidden">
+          <div className="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center">
+            <svg viewBox="0 0 24 24" fill="none" className="w-5 h-5 text-white" stroke="currentColor" strokeWidth={1.5}>
+              <circle cx="12" cy="12" r="3" fill="currentColor" />
+              <path strokeLinecap="round" strokeLinejoin="round"
+                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z" />
+            </svg>
+          </div>
+          <span className="font-bold text-xl text-gray-900 dark:text-white">
+            Ocu<span className="text-blue-600">lus</span>
+          </span>
+        </div>
+
+        <div className="w-full max-w-sm">
+          {/* Header */}
+          <div className="mb-8">
+            <h2 className="text-2xl font-bold text-gray-900 dark:text-white">Welcome back</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mt-1">Sign in to your Oculus workspace</p>
+          </div>
+
+          {/* Form card */}
+          <div className="bg-white dark:bg-slate-900 rounded-2xl shadow-xl shadow-black/5 dark:shadow-black/40
+                          border border-gray-100 dark:border-white/[0.06] p-8 space-y-5">
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+                Email address
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={e => setEmail(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && submit()}
+                placeholder="you@company.com"
+                className="w-full rounded-xl border border-gray-200 dark:border-white/[0.08]
+                           bg-gray-50 dark:bg-white/[0.04]
+                           text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600
+                           px-4 py-3 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500/60
+                           transition-all" />
+            </div>
+
+            <div className="space-y-1">
+              <label className="text-xs font-medium text-gray-600 dark:text-gray-400 uppercase tracking-wider">
+                Password
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                onKeyDown={e => e.key === "Enter" && submit()}
+                placeholder="••••••••"
+                className="w-full rounded-xl border border-gray-200 dark:border-white/[0.08]
+                           bg-gray-50 dark:bg-white/[0.04]
+                           text-gray-900 dark:text-white placeholder-gray-400 dark:placeholder-gray-600
+                           px-4 py-3 text-sm
+                           focus:outline-none focus:ring-2 focus:ring-blue-500/40 focus:border-blue-500/60
+                           transition-all" />
+            </div>
+
+            {error && (
+              <div className="rounded-xl bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800/40
+                              px-4 py-3 text-sm text-red-700 dark:text-red-400">
+                {error}
+              </div>
+            )}
+
+            <button
+              onClick={submit}
+              disabled={loading || !email || !password}
+              className="w-full rounded-xl bg-blue-600 hover:bg-blue-700 active:bg-blue-800
+                         disabled:opacity-40 disabled:cursor-not-allowed
+                         text-white font-medium py-3 text-sm
+                         transition-all shadow-lg shadow-blue-600/25
+                         flex items-center justify-center gap-2">
+              {loading ? (
+                <>
+                  <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Signing in…
+                </>
+              ) : (
+                "Sign in to Oculus"
+              )}
+            </button>
+          </div>
+
+          {/* Footer */}
+          <p className="text-center text-xs text-gray-400 dark:text-gray-600 mt-6">
+            Oculus Intelligent Vision &mdash; v1.1
+          </p>
+        </div>
       </div>
     </div>
   );

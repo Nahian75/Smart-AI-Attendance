@@ -1,11 +1,11 @@
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, Query
 from sqlalchemy import select
 from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ...dependencies import get_db, get_current_user, role_required, CurrentUser
-from ...models import FaceEmbedding
+from ...dependencies import get_db, get_current_user, role_required, CurrentUser, verify_edge_token
+from ...models import FaceEmbedding, Tenant
 from ...services.face_service import FaceEnrollmentService
 
 router = APIRouter()
@@ -32,6 +32,44 @@ async def export_embeddings(
         select(FaceEmbedding)
         .options(joinedload(FaceEmbedding.employee))
         .where(FaceEmbedding.tenant_id == user.tenant_id)
+    )).unique().scalars().all()
+    return [
+        {
+            "employee_id": str(row.employee_id),
+            "employee_name": row.employee.full_name if row.employee else str(row.employee_id)[:8],
+            "embedding": [float(x) for x in row.embedding],
+            "photo_angle": row.photo_angle,
+        }
+        for row in rows
+    ]
+
+
+@router.get("/export-edge", summary="Export embeddings for edge FAISS sync (edge-token auth)")
+async def export_embeddings_edge(
+    tenant_id: str = Query(..., description="Tenant slug (e.g. 'demo') or UUID"),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(verify_edge_token),
+):
+    """Edge-node endpoint authenticated by the shared EDGE_TOKEN secret (not JWT).
+
+    Accepts tenant_id as either a slug ('demo') or a UUID string.
+    Scoped to a single tenant so edge nodes only receive their own enrollments.
+    """
+    # Resolve slug → UUID if needed
+    try:
+        tid = uuid.UUID(tenant_id)
+    except ValueError:
+        tenant = (await db.execute(
+            select(Tenant).where(Tenant.slug == tenant_id, Tenant.is_active.is_(True))
+        )).scalar_one_or_none()
+        if not tenant:
+            raise HTTPException(status_code=404, detail=f"Tenant '{tenant_id}' not found")
+        tid = tenant.id
+
+    rows = (await db.execute(
+        select(FaceEmbedding)
+        .options(joinedload(FaceEmbedding.employee))
+        .where(FaceEmbedding.tenant_id == tid)
     )).unique().scalars().all()
     return [
         {

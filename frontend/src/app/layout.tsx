@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 import { ThemeProvider } from "@/contexts/ThemeContext";
 
 export const metadata: Metadata = {
-  title: "Argus — AI Attendance",
+  title: "Oculus — AI Attendance",
   description: "Always watching. Always accurate.",
 };
 

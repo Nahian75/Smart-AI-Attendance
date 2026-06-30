@@ -4,9 +4,8 @@ insightface==0.7.3           # ArcFace R100 + SCRFD face detector
 onnxruntime-gpu==1.20.1
 faiss-cpu==1.9.0             # swap for faiss-gpu on CUDA hosts
 opencv-python==4.10.0.84
-numpy==2.2.1
+numpy==1.26.4
 redis==5.2.1
-aiokafka==0.12.0
 httpx==0.28.1
 pyyaml==6.0.2
 aiohttp==3.11.11
@@ -14,3 +13,5 @@ aiohttp==3.11.11
 onvif-zeep==0.2.12           # ONVIF Profile S/T — works with any brand IP camera/DVR
 av==13.1.0                   # PyAV (libavcodec) — decodes H.264/H.265 from SDK callbacks
 zeep==4.2.1                  # SOAP client required by onvif-zeep
+# ── MediaPipe head-pose filter + face alignment ───────────────────────────────
+mediapipe==0.10.35           # Face Mesh — filters angled faces, aligns crops for ArcFace

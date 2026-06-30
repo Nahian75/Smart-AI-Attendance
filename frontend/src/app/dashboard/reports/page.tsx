@@ -12,7 +12,7 @@ export default function ReportsPage() {
   return (
     <DashboardShell>
       <h2 className="text-lg font-medium mb-4">Reports</h2>
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 mb-4">
+      <div className="glass rounded-xl p-4 mb-4">
         <p className="text-sm font-medium mb-3 text-gray-900 dark:text-white">Monthly attendance CSV export</p>
         <div className="flex items-center gap-3">
           <select value={year} onChange={(e) => setYear(+e.target.value)}

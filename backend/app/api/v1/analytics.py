@@ -27,14 +27,10 @@ async def occupancy(
 @router.get("/hourly", summary="Hourly entry/exit counts for a date (for bar chart)")
 async def hourly(
     day: date = Query(default_factory=date.today),
-    camera_id: Optional[uuid.UUID] = None,
     db: AsyncSession = Depends(get_db),
     user: CurrentUser = Depends(get_current_user),
 ):
     """Returns 24-slot array of {hour, entries, exits}. Powers the Recharts bar chart."""
-    start = datetime.combine(day, datetime.min.time())
-    end   = datetime.combine(day + timedelta(days=1), datetime.min.time())
-
     stmt = select(AttendanceLog).where(
         AttendanceLog.tenant_id == user.tenant_id,
         AttendanceLog.attendance_date == day,

@@ -25,7 +25,11 @@ import cv2
 from typing import Callable
 from ..utils.logger import get_logger
 
-log = logging.getLogger("rtsp") if False else get_logger("rtsp")
+# Guards the temporary OPENCV_FFMPEG_CAPTURE_OPTIONS override in _open_cap
+# so parallel camera-connect threads don't clobber each other's env var.
+_env_lock = threading.Lock()
+
+log = get_logger("rtsp")
 
 _OPEN_TIMEOUT_MS  = 20_000   # raised: H.265 DVR streams need 3-8s for codec init
 _READ_TIMEOUT_MS  = 8_000
@@ -210,12 +214,18 @@ class RTSPReader:
             h   = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
             fps = cap.get(cv2.CAP_PROP_FPS) or 0
 
+            # Reject 0×0 streams — FFmpeg opened the TCP connection but could
+            # not parse the codec headers (H.265+, encrypted, wrong URL, etc.).
+            # Without this check the reader would "connect" but never get frames.
+            if w == 0 or h == 0:
+                log.warning("[%s] stream opened but resolution is 0×0 — codec unreadable, rejecting",
+                            self.camera_id)
+                cap.release()
+                return False
+
             if self._fps_target_override:
                 self.fps_target = self._fps_target_override
-            elif fps > 0:
-                # Auto: process 1 in every 3 frames the camera sends.
-                # Clamp [4, 10] — below 4 the vote buffer is too slow;
-                # above 10 inference can't keep up on CPU.
+            elif fps > 0 and fps < 200:
                 self.fps_target = max(4, min(10, round(fps / 3)))
                 log.info("[%s] fps_target auto-set to %d (native=%.0f, ratio=1:3)",
                          self.camera_id, self.fps_target, fps)
@@ -243,14 +253,11 @@ class RTSPReader:
 
         def _try(extra_opts: str = "") -> cv2.VideoCapture | None:
             if is_rtsp and extra_opts:
-                # Temporarily override the module-level options for this attempt.
-                # Safe because this method is called from the dispatch thread
-                # (one per camera), and we restore the original value immediately.
-                original = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
-                base = original.split("|")[0]  # keep rtsp_transport value
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = extra_opts
-                cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
-                os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = original
+                with _env_lock:
+                    original = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS", "")
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = extra_opts
+                    cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = original
             elif is_rtsp:
                 cap = cv2.VideoCapture(src, cv2.CAP_FFMPEG)
             else:
@@ -263,18 +270,11 @@ class RTSPReader:
                 cap.release()
                 return None
 
-            # Verify isOpened() isn't lying by reading up to 5 frames.
-            # 5 frames at 10fps = 500ms max probe delay (was 20 = 2s).
-            # Dark/night cameras produce valid near-black frames — we accept
-            # any frame where the read call returns ok=True with data.
-            for _ in range(5):
-                ok, frame = cap.read()
-                if ok and frame is not None and frame.size > 0:
-                    return cap
-            log.warning("[%s] stream opened but first 5 reads returned no data",
-                        self.camera_id)
-            cap.release()
-            return None
+            # Don't probe frames here — the 5-frame probe consumed the DVR's
+            # initial burst, leaving the capture thread with an empty buffer.
+            # _try_rtsp already has a first_frame.wait(timeout=25) gate that
+            # correctly validates the connection once the capture thread is live.
+            return cap
 
         # Attempt 1: TCP with standard options
         cap = _try()
@@ -292,12 +292,7 @@ class RTSPReader:
             if cap is not None:
                 return cap
 
-            # Attempt 3: TCP with strict=-2 (unofficial extensions allowed).
-            # Hikvision DVR models use H.265+ — a proprietary variant of H.265
-            # with non-standard VPS reserved bits. Standard FFmpeg rejects these
-            # packets with "vps_reserved_three_2bits is not three" and
-            # "VPS/SPS/PPS does not exist" errors. strict=-2 tells FFmpeg to
-            # accept unofficial codec extensions and attempt decoding anyway.
+            # Attempt 3: TCP with strict=-2 (H.265+ lenient mode).
             log.warning(
                 "[%s] UDP also failed — retrying with H.265+ lenient mode (Hikvision DVR)",
                 self.camera_id,
@@ -312,11 +307,8 @@ class RTSPReader:
                 return cap
 
             # Attempt 4: force output pixel format — last-resort for chroma issues.
-            log.warning(
-                "[%s] strict mode: no data in 20 reads — "
-                "retrying with forced pixel format",
-                self.camera_id,
-            )
+            log.warning("[%s] H.265+ lenient failed — retrying with forced pixel format",
+                        self.camera_id)
             cap = _try(
                 "rtsp_transport;tcp"
                 "|strict;-2"

@@ -50,7 +50,7 @@ export default function AnalyticsPage() {
     return (
       <DashboardShell>
         <h2 className="text-lg font-medium">Analytics</h2>
-        <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-8 text-center text-gray-400 dark:text-gray-500">Loading...</div>
+        <div className="glass rounded-xl p-8 text-center text-gray-400 dark:text-gray-500">Loading...</div>
       </DashboardShell>
     );
   }
@@ -60,7 +60,7 @@ export default function AnalyticsPage() {
       <h2 className="text-lg font-medium">Analytics</h2>
 
       {/* Building-wide occupancy */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 mb-6">
+      <div className="glass rounded-xl p-4 mb-6">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2 text-sm text-gray-500">
             <Building2 size={16} /> Building occupancy
@@ -72,7 +72,7 @@ export default function AnalyticsPage() {
       {/* Department breakdown */}
       <div className="grid grid-cols-2 gap-4 mb-6">
         {Object.entries(departmentOccupancy).map(([dept, count]) => (
-          <div key={dept} className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4">
+          <div key={dept} className="glass rounded-xl p-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <Users size={14} /> {dept.replace(/_/g, " ")}
@@ -82,14 +82,14 @@ export default function AnalyticsPage() {
           </div>
         ))}
         {Object.keys(departmentOccupancy).length === 0 && (
-          <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-8 text-center text-gray-400 dark:text-gray-500 text-sm col-span-2">
+          <div className="glass rounded-xl p-8 text-center text-gray-400 dark:text-gray-500 text-sm col-span-2">
             No department data available
           </div>
         )}
       </div>
 
       {/* Shift compliance */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+      <div className="glass rounded-xl">
         <div className="px-4 py-3 border-b dark:border-gray-700 flex items-center gap-2">
           <Calendar size={16} className="text-amber-500" />
           <span className="text-sm font-medium">Shift compliance — this week</span>

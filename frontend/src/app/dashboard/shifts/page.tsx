@@ -57,8 +57,8 @@ function ShiftModal({ initial, onClose, onSaved }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-md">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="glass-heavy rounded-2xl w-full max-w-md">
         <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b dark:border-gray-700">
           <h3 className="text-base font-semibold text-gray-900 dark:text-white flex items-center gap-2">
             <Clock size={16} className="text-blue-600" />
@@ -183,8 +183,8 @@ function AssignModal({ shifts, onClose, onSaved }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-sm">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm p-4">
+      <div className="glass-heavy rounded-2xl w-full max-w-sm">
         <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b dark:border-gray-700">
           <h3 className="text-base font-semibold text-gray-900 dark:text-white">Assign Shift</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"><X size={18} /></button>
@@ -326,7 +326,7 @@ export default function ShiftsPage() {
       </div>
 
       {/* ── Shifts list ── */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+      <div className="glass rounded-xl">
         <div className="px-4 py-3 border-b dark:border-gray-700 text-sm font-medium text-gray-900 dark:text-white">
           Shifts ({shifts.length})
         </div>
@@ -380,7 +380,7 @@ export default function ShiftsPage() {
       </div>
 
       {/* ── Employee assignments ── */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+      <div className="glass rounded-xl">
         <div className="px-4 py-3 border-b dark:border-gray-700 text-sm font-medium text-gray-900 dark:text-white">
           Employee Shift Assignments ({assignments.length})
         </div>

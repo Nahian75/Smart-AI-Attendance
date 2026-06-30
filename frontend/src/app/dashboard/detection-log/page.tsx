@@ -142,7 +142,7 @@ function DetectionCard({ item, onZoom }: { item: DetectionItem; onZoom: (url: st
   const spoof = item.spoof_score != null ? item.spoof_score.toFixed(3) : null;
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 overflow-hidden hover:shadow-md transition-shadow">
+    <div className="glass rounded-xl overflow-hidden hover:shadow-md transition-shadow">
       <Snapshot
         url={item.snapshot_url}
         name={item.employee_name || "Unknown"}
@@ -248,7 +248,7 @@ export default function DetectionLogPage() {
             { label: "Unknown Persons",  value: stats.unknown,          color: "text-orange-600 dark:text-orange-400" },
             { label: "Spoof Attempts",   value: stats.spoof_attempts,   color: "text-red-600 dark:text-red-400" },
           ].map((s) => (
-            <div key={s.label} className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-3">
+            <div key={s.label} className="glass rounded-xl p-3">
               <p className="text-xs text-gray-500 dark:text-gray-400 mb-1">{s.label}</p>
               <p className={`text-2xl font-semibold ${s.color}`}>{s.value}</p>
             </div>

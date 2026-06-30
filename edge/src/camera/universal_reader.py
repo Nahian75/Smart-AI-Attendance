@@ -91,6 +91,12 @@ class UniversalCameraReader:
         # Mirror RTSPReader's public attribute so heartbeat_loop works
         self._dispatch_thread: threading.Thread | None = None
 
+        # Track SDK failure so we skip it on reconnects and go straight to RTSP.
+        # SDK attempt takes 15s and leaves the DVR slot busy for several seconds
+        # after logout, causing subsequent RTSP connections to get 0×0 resolution.
+        # Once RTSP is known to work, SDK is never retried for this camera.
+        self._sdk_works: bool | None = None   # None=untried, True=works, False=failed
+
     # ── Public API (same as RTSPReader) ──────────────────────────────────────
 
     def start(self, on_frame: Callable) -> None:
@@ -165,37 +171,46 @@ class UniversalCameraReader:
 
     def _try_all_methods(self) -> bool:
         # ── 0. Vendor SDK FIRST when available ───────────────────────────────
-        # Some DVRs (Hikvision H.264+/H.265+, Dahua proprietary) produce RTSP
-        # streams that FFmpeg "decodes" into garbage green/gray frames instead
-        # of failing outright. If we tried RTSP first it would falsely succeed
-        # and the SDK would never run. So when the vendor SDK .so is installed
-        # AND the URL matches that vendor, use the SDK before RTSP.
-        if _is_hikvision_url(self.rtsp_url) and self._hikvision_sdk_available():
+        # Only try SDK if it hasn't already failed for this camera.  When SDK
+        # fails (no first frame in 15s), it leaves the DVR slot busy for
+        # several seconds after logout, causing RTSP to get 0×0 resolution on
+        # the very next attempt.  Once we know SDK fails, skip it so RTSP
+        # connects cleanly without the DVR slot interference.
+        if _is_hikvision_url(self.rtsp_url) and self._hikvision_sdk_available() \
+                and self._sdk_works is not False:
             log.info("[%s] Hikvision URL + HCNetSDK present — using SDK first",
                      self.camera_id)
             if self._try_hikvision_sdk():
+                self._sdk_works = True
                 return True
+            else:
+                self._sdk_works = False
+                log.info("[%s] SDK failed — skipping SDK on future reconnects, using RTSP",
+                         self.camera_id)
+                # Brief pause so the DVR releases the slot before RTSP tries.
+                time.sleep(5)
 
-        if _is_dahua_url(self.rtsp_url) and self._dahua_sdk_available():
+        if _is_dahua_url(self.rtsp_url) and self._dahua_sdk_available() \
+                and self._sdk_works is not False:
             log.info("[%s] Dahua URL + NetSDK present — using SDK first",
                      self.camera_id)
             if self._try_dahua_sdk():
+                self._sdk_works = True
                 return True
+            else:
+                self._sdk_works = False
+                time.sleep(5)
 
         # ── 1. ONVIF → RTSP ──────────────────────────────────────────────────
-        # Skip ONVIF when the vendor SDK already handled the camera above,
-        # and skip for Hikvision/Dahua when their SDK is installed (SDK path
-        # already exhausted above and failed — ONVIF won't help either).
-        _skip_onvif = (
-            (_is_hikvision_url(self.rtsp_url) and self._hikvision_sdk_available()) or
-            (_is_dahua_url(self.rtsp_url) and self._dahua_sdk_available())
-        )
-        if not _skip_onvif:
-            onvif_url = self._resolve_onvif()
-            if onvif_url:
-                log.info("[%s] ONVIF URI resolved — trying RTSP", self.camera_id)
-                if self._try_rtsp(onvif_url):
-                    return True
+        # Always try ONVIF after SDK fails — the resolver prefers H.264 profiles,
+        # which avoids H.265+ main streams that FFmpeg can't decode even when
+        # the SDK or VLC handle them fine. This is the fix for Hikvision DVRs
+        # where channel N main stream is H.265+ but the ONVIF sub-stream is H.264.
+        onvif_url = self._resolve_onvif()
+        if onvif_url:
+            log.info("[%s] ONVIF URI resolved — trying RTSP", self.camera_id)
+            if self._try_rtsp(onvif_url):
+                return True
 
         # ── 2. RTSP direct ───────────────────────────────────────────────────
         if self._try_rtsp(self.rtsp_url):
@@ -274,15 +289,34 @@ class UniversalCameraReader:
             if not HikvisionSDKCapture.is_available():
                 return False
             p = self._params
+
+            # Wait for the first real decoded frame before declaring success.
+            # cap.start() returns True on SDK login + preview start, but frames
+            # only flow once PyAV decodes the first chunk from the callback.
+            # Without this gate, RTSP fallback never runs on cameras where the
+            # SDK connects but the data callback is never fired.
+            first_frame = threading.Event()
+
+            def _on_frame_tracked(frame, ts):
+                first_frame.set()
+                if self._on_frame:
+                    self._on_frame(frame, ts)
+
             cap = HikvisionSDKCapture(
                 host=p["host"], port=8000,
                 username=p["username"], password=p["password"],
                 channel=p["channel"],
             )
-            if cap.start(self._on_frame):
+            if not cap.start(_on_frame_tracked):
+                return False
+
+            if first_frame.wait(timeout=15):
                 self._inner = cap
                 log.info("[%s] connected via Hikvision HCNetSDK", self.camera_id)
                 return True
+
+            log.debug("[%s] HCNetSDK: no frames in 15s — falling back", self.camera_id)
+            cap.stop()
         except Exception as e:
             log.debug("[%s] HCNetSDK: %s", self.camera_id, e)
         return False
@@ -293,15 +327,29 @@ class UniversalCameraReader:
             if not DahuaSDKCapture.is_available():
                 return False
             p = self._params
+
+            first_frame = threading.Event()
+
+            def _on_frame_tracked(frame, ts):
+                first_frame.set()
+                if self._on_frame:
+                    self._on_frame(frame, ts)
+
             cap = DahuaSDKCapture(
                 host=p["host"], port=37777,
                 username=p["username"], password=p["password"],
                 channel=p["channel"],
             )
-            if cap.start(self._on_frame):
+            if not cap.start(_on_frame_tracked):
+                return False
+
+            if first_frame.wait(timeout=15):
                 self._inner = cap
                 log.info("[%s] connected via Dahua NetSDK", self.camera_id)
                 return True
+
+            log.debug("[%s] DahuaSDK: no frames in 15s — falling back", self.camera_id)
+            cap.stop()
         except Exception as e:
             log.debug("[%s] DahuaSDK: %s", self.camera_id, e)
         return False

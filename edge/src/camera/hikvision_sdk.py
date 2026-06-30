@@ -109,12 +109,15 @@ REALDATACALLBACK = ctypes.CFUNCTYPE(
 )
 
 
+_sdk_initialized = False   # NET_DVR_Init must only be called once per process
+_sdk_init_lock   = threading.Lock()
+
+
 def _find_sdk_lib() -> str | None:
     for d in _SDK_DIRS:
         path = os.path.join(d, _SDK_LIB)
         if os.path.exists(path):
             return path
-    # Also check system library path
     found = ctypes.util.find_library("hcnetsdk")
     return found
 
@@ -205,9 +208,8 @@ class HikvisionSDKCapture:
             log.debug("HikvisionSDK: library not found in %s", _SDK_DIRS)
             return None
         try:
-            # Pre-load dependency .so files from the same directory
+            global _sdk_initialized
             lib_dir = os.path.dirname(lib_path)
-            # Load dependency .so files — order matters (deps before main)
             dep_dirs = [lib_dir, os.path.join(lib_dir, "HCNetSDKCom")]
             dep_names = [
                 "libcrypto.so", "libssl.so", "libhpr.so",
@@ -228,10 +230,17 @@ class HikvisionSDKCapture:
                         break
 
             sdk = ctypes.CDLL(lib_path, mode=ctypes.RTLD_GLOBAL)
-            sdk.NET_DVR_Init()
-            sdk.NET_DVR_SetConnectTime(2000, 1)
-            sdk.NET_DVR_SetReconnect(10000, True)
-            log.info("HikvisionSDK loaded: %s", lib_path)
+
+            with _sdk_init_lock:
+                global _sdk_initialized
+                if not _sdk_initialized:
+                    sdk.NET_DVR_Init()
+                    sdk.NET_DVR_SetConnectTime(2000, 1)
+                    sdk.NET_DVR_SetReconnect(0, False)
+                    _sdk_initialized = True
+                    log.info("HikvisionSDK loaded and initialised: %s", lib_path)
+                else:
+                    log.info("HikvisionSDK loaded (already initialised): %s", lib_path)
             return sdk
         except Exception as e:
             log.warning("HikvisionSDK load failed: %s", e)
@@ -247,7 +256,9 @@ class HikvisionSDKCapture:
 
         dev_info = NET_DVR_DEVICEINFO_V40()
 
-        self._sdk.NET_DVR_Login_V40.restype = ctypes.c_long
+        # SDK LONG = 32-bit int on Linux — must use c_int, not c_long (64-bit).
+        # c_long would read -1 (0xFFFFFFFF) as 4294967295, masking login failures.
+        self._sdk.NET_DVR_Login_V40.restype = ctypes.c_int
         uid = self._sdk.NET_DVR_Login_V40(
             ctypes.byref(info), ctypes.byref(dev_info)
         )
@@ -269,7 +280,7 @@ class HikvisionSDKCapture:
         def _raw_cb(handle, data_type, buf, buf_size, user):
             if not self._running:
                 return
-            if data_type in (NET_DVR_SYSHEAD, NET_DVR_STREAMDATA):
+            if data_type in (NET_DVR_SYSHEAD, NET_DVR_STREAMDATA, NET_DVR_RTP_OR_RTSP):
                 raw = bytes(buf[:buf_size])
                 # Drop the OLDEST chunk when full to maintain low latency.
                 # If we dropped the new chunk (put_nowait) the decoder would
@@ -286,7 +297,7 @@ class HikvisionSDKCapture:
 
         self._cb_ref = REALDATACALLBACK(_raw_cb)
 
-        self._sdk.NET_DVR_RealPlay_V40.restype = ctypes.c_long
+        self._sdk.NET_DVR_RealPlay_V40.restype = ctypes.c_int
         handle = self._sdk.NET_DVR_RealPlay_V40(
             self._user_id,
             ctypes.byref(preview),
@@ -328,12 +339,11 @@ class HikvisionSDKCapture:
 
         while self._running:
             try:
-                chunk = self._chunk_q.get(timeout=2.0)
+                chunk = self._chunk_q.get(timeout=3.0)
             except queue.Empty:
-                # If we haven't received data for 2s the stream likely dropped
                 consecutive_errors += 1
-                if consecutive_errors >= 5:
-                    log.warning("[HikvisionSDK] %s ch%d: no data for 10s — stream lost",
+                if consecutive_errors >= 10:
+                    log.warning("[HikvisionSDK] %s ch%d: no data for 30s — stream lost",
                                 self.host, self.channel)
                     break
                 continue

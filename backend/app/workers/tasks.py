@@ -14,7 +14,7 @@ SNAPSHOT_RETENTION_DAYS = 7
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 @celery_app.task
@@ -33,19 +33,25 @@ def mark_absentees():
     """Create absent records for active employees with no log today."""
     async def _do():
         from datetime import date
+        today = date.today()
         async with AsyncSessionLocal() as db:
-            emps = (await db.execute(select(Employee).where(Employee.is_active.is_(True)))).scalars().all()
+            emps = (await db.execute(
+                select(Employee).where(Employee.is_active.is_(True))
+            )).scalars().all()
             for e in emps:
                 existing = (await db.execute(
                     select(AttendanceLog).where(
                         AttendanceLog.employee_id == e.id,
-                        AttendanceLog.attendance_date == date.today(),
+                        AttendanceLog.tenant_id == e.tenant_id,
+                        AttendanceLog.attendance_date == today,
                     )
                 )).scalar_one_or_none()
                 if not existing:
-                    db.add(AttendanceLog(tenant_id=e.tenant_id, employee_id=e.id,
-                                         branch_id=e.branch_id, attendance_date=date.today(),
-                                         status="absent"))
+                    db.add(AttendanceLog(
+                        tenant_id=e.tenant_id, employee_id=e.id,
+                        branch_id=e.branch_id, attendance_date=today,
+                        status="absent",
+                    ))
             await db.commit()
     _run(_do())
     return "absentees marked"
@@ -76,4 +82,46 @@ def purge_snapshots():
 
 @celery_app.task
 def email_digest():
-    return "digest queued"
+    """Send a daily attendance digest email per tenant to ALERT_EMAIL_TO."""
+    async def _do():
+        from datetime import date
+        from sqlalchemy import select, func, distinct
+        from ..models import Employee, AttendanceLog
+        from ..services.notification_service import NotificationService
+
+        today = date.today()
+        results = []
+        async with AsyncSessionLocal() as db:
+            tenant_ids = (await db.execute(
+                select(distinct(Employee.tenant_id)).where(Employee.is_active.is_(True))
+            )).scalars().all()
+
+            notifier = NotificationService()
+            for tid in tenant_ids:
+                total = (await db.execute(
+                    select(func.count(Employee.id)).where(
+                        Employee.is_active.is_(True),
+                        Employee.tenant_id == tid,
+                    )
+                )).scalar() or 0
+
+                logs = (await db.execute(
+                    select(AttendanceLog).where(
+                        AttendanceLog.attendance_date == today,
+                        AttendanceLog.tenant_id == tid,
+                    )
+                )).scalars().all()
+
+                present = sum(1 for l in logs if l.status in ("present", "late"))
+                late    = sum(1 for l in logs if l.is_late)
+                absent  = max(total - present, 0)
+
+                await notifier.notify_digest(
+                    date_str=today.isoformat(),
+                    total=total, present=present, absent=absent, late=late,
+                )
+                results.append(f"tenant={tid}: {present}/{total} present")
+
+        return "; ".join(results) if results else "no active tenants"
+
+    return _run(_do())

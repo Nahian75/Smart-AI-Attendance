@@ -14,7 +14,7 @@ export default function HourlyChart({ date }: { date?: string }) {
   const display = active.length ? data.filter((d) => d.hour >= 6 && d.hour <= 22) : data.slice(7, 20);
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4">
+    <div className="glass rounded-xl p-4">
       <p className="text-sm font-medium mb-3 text-gray-900 dark:text-white">Hourly entry & exit</p>
       <ResponsiveContainer width="100%" height={160}>
         <BarChart data={display} barSize={10}>

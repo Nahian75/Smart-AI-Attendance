@@ -91,7 +91,10 @@ class ArcFaceRecognizer:
             name=model_name,
             providers=gpu["ort_providers"],
         )
-        self.app.prepare(ctx_id=ctx_id, det_size=det_size)
+        # det_thresh=0.3 — default is 0.5 which misses faces at CCTV/overhead
+        # angles where detection confidence is 0.3–0.45. Our min_det_score in
+        # FrameProcessor filters out junk below the quality threshold we want.
+        self.app.prepare(ctx_id=ctx_id, det_size=det_size, det_thresh=0.3)
         self._det_size = det_size
 
     @property

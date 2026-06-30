@@ -55,8 +55,8 @@ function EditLogModal({ log, onClose, onSaved }: { log: EditState; onClose: () =
   }
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50">
-      <div className="bg-white dark:bg-gray-800 rounded-xl shadow-xl p-5 w-80 space-y-3">
+    <div className="fixed inset-0 bg-black/40 backdrop-blur-sm flex items-center justify-center z-50">
+      <div className="glass-heavy rounded-xl p-5 w-80 space-y-3">
         <div className="flex items-center justify-between">
           <span className="font-medium text-sm">Edit Attendance</span>
           <button onClick={onClose}><X size={16} /></button>
@@ -200,7 +200,7 @@ export default function Dashboard() {
       {/* Stat cards */}
       <div className="grid grid-cols-5 gap-3">
         {stats.map((s) => (
-          <div key={s.label} className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-3">
+          <div key={s.label} className="glass rounded-xl p-3">
             <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 mb-1.5">
               <s.icon size={13} /> {s.label}
             </div>
@@ -228,7 +228,7 @@ export default function Dashboard() {
       )}
 
       {/* Live cameras */}
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+      <div className="glass rounded-xl">
         <div className="px-4 py-3 border-b dark:border-gray-700 flex items-center gap-2">
           <span className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
           <span className="text-sm font-medium text-gray-900 dark:text-white">Live Cameras</span>
@@ -269,7 +269,7 @@ export default function Dashboard() {
       {/* 3-col live area */}
       <div className="grid grid-cols-[1fr_280px_280px] gap-4">
         {/* Recent check-ins table */}
-        <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+        <div className="glass rounded-xl">
           <div className="px-4 py-3 border-b dark:border-gray-700 text-sm font-medium text-gray-900 dark:text-white flex items-center justify-between">
             <span>Recent check-ins</span>
             {can("admin") && (

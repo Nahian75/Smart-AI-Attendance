@@ -28,7 +28,7 @@ class Settings(BaseSettings):
     EDGE_TOKEN: str = ""
 
     # ── Recognition thresholds (PRD §6.3 — all tunable per deployment) ──
-    CONFIDENCE_THRESHOLD: float = 0.75   # below → unknown (robust balance of accuracy and speed)
+    CONFIDENCE_THRESHOLD: float = 0.35   # below → unknown; must stay below lowest per-camera edge threshold
     LIVENESS_THRESHOLD: float = 0.80     # PRD §6.3: 0.80
     COOLDOWN_MINUTES: int = 5            # per person per camera
 

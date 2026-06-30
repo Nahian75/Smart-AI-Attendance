@@ -189,20 +189,22 @@ export const api = {
     request(`/api/v1/employees/${id}/vip?flagged=${flagged}`, { method: "PATCH" }),
 
   // Cameras
-  cameras: () => request<import("@/types").Camera[]>("/api/v1/cameras"),
+  cameras: (includeDisabled = false) =>
+    request<import("@/types").Camera[]>(`/api/v1/cameras?include_disabled=${includeDisabled}`),
   addCamera: (payload: object) =>
     request("/api/v1/cameras", { method: "POST", body: JSON.stringify(payload) }),
   updateCamera: (id: string, payload: object) =>
     request(`/api/v1/cameras/${id}`, { method: "PATCH", body: JSON.stringify(payload) }),
   deleteCamera: (id: string) =>
     request(`/api/v1/cameras/${id}`, { method: "DELETE" }),
+  toggleCamera: (id: string) =>
+    request<{ id: string; is_active: boolean; status: string }>(`/api/v1/cameras/${id}/toggle`, { method: "POST" }),
+  scanCameras: () =>
+    request<{ cameras: { onvif_url: string | null; rtsp_url: string | null; types: string }[]; count: number }>("/api/v1/cameras/scan"),
+  autoConfigure: (id: string) =>
+    request<{ id: string; direction: string; camera_role: string; cctv_mode: boolean; note: string }>(`/api/v1/cameras/${id}/auto-configure`, { method: "POST" }),
   cameraPreview: (id: string) =>
     requestBlob(`/api/v1/cameras/${id}/preview`),
-  // Helper to get an authenticated stream URL for live viewing
-  cameraStreamUrl: (id: string) => {
-    const token = typeof window !== "undefined" ? localStorage.getItem("token") : null;
-    return `${API}/api/v1/cameras/${id}/preview${token ? `?token=${token}` : ""}`;
-  },
 
   // Alerts (PRD §5.3)
   alerts: (unackedOnly = false) =>

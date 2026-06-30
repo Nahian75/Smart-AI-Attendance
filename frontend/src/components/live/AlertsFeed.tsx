@@ -65,7 +65,7 @@ export default function AlertsFeed({ limit = 8 }: { limit?: number }) {
   const unacked = alerts.filter((a) => !a.is_acknowledged).length;
 
   return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700">
+    <div className="glass rounded-xl">
       <div className="px-4 py-3 border-b dark:border-gray-700 flex items-center justify-between">
         <span className="text-sm font-medium text-gray-900 dark:text-white flex items-center gap-1.5">
           <AlertTriangle size={14} className="text-red-500" /> Security alerts

@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxml2-dev libxslt-dev \
     # Required by Hikvision/Dahua SDK .so files
     libssl-dev libcrypto++-dev \
+    # Required by MediaPipe FaceLandmarker in headless Docker (no display server)
+    libgles2 libegl1 \
     && rm -rf /var/lib/apt/lists/*
 
 # ── SDK directories: place vendor .so files here at deploy time ──────────────
@@ -33,7 +35,6 @@ COPY requirements.txt .
 RUN pip uninstall -y opencv-python opencv-python-headless 2>/dev/null || true && \
     rm -rf /usr/local/lib/python3.10/dist-packages/cv2 && \
     pip install --no-cache-dir -r requirements.txt && \
-    pip install --no-cache-dir "numpy<2.0" --force-reinstall && \
     pip uninstall -y onnxruntime 2>/dev/null || true && \
     pip install --no-cache-dir onnxruntime-gpu==1.20.1
 
@@ -48,5 +49,14 @@ RUN python -c "from ultralytics import YOLO; YOLO('yolo11s.pt')" && ls -lh yolo1
 # normally since arcface.py passes ctx_id=0 (no providers override) when DEVICE=cuda.
 RUN python -c "from insightface.app import FaceAnalysis; app = FaceAnalysis(name='buffalo_l', providers=['CPUExecutionProvider']); app.prepare(ctx_id=-1, det_size=(640,640)); print('buffalo_l ready')" && \
     ls -lh /root/.insightface/models/buffalo_l/
+
+# Pre-download MediaPipe FaceLandmarker model so first startup doesn't fetch it.
+RUN python -c "\
+import urllib.request, os; \
+os.makedirs('edge/weights', exist_ok=True); \
+url='https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task'; \
+urllib.request.urlretrieve(url, 'edge/weights/face_landmarker.task'); \
+size=os.path.getsize('edge/weights/face_landmarker.task')/1048576; \
+print(f'face_landmarker.task ready ({size:.1f} MB)')"
 
 CMD ["python", "-m", "src.main"]

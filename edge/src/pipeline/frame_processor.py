@@ -19,11 +19,12 @@ import cv2
 import numpy as np
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from ..detection.yolo_detector import YOLODetector
+from ..detection.yolo_detector import YOLODetector, Track
 from ..recognition.arcface import ArcFaceRecognizer
 from ..recognition.anti_spoof import AntiSpoofChecker
 from ..recognition.mask_detector import MaskDetector
 from ..recognition.faiss_search import FaissSearch
+from ..recognition.mediapipe_align import MediaPipeFaceAligner
 from ..utils.logger import get_logger
 from ..utils.superres import FaceSuperRes
 
@@ -61,29 +62,38 @@ def _enhance_face(face_img: np.ndarray) -> np.ndarray:
     if face_img is None or face_img.size == 0:
         return face_img
 
-    # Resize to a fixed input size so processing cost is predictable
     h, w = face_img.shape[:2]
     if h < 32 or w < 32:
         return face_img  # too small to enhance meaningfully
 
-    work = cv2.resize(face_img, (128, 128)) if min(h, w) < 128 else face_img.copy()
+    # Upscale to at least 640 px on the short side (1080P source gives larger
+    # raw crops so we can afford a higher target without excessive stretching).
+    _TARGET = 640
+    if min(h, w) < _TARGET:
+        scale = _TARGET / min(h, w)
+        work = cv2.resize(face_img, (int(w * scale), int(h * scale)),
+                          interpolation=cv2.INTER_LANCZOS4)
+    else:
+        work = face_img.copy()
 
-    # 1. Bilateral denoise: removes block artifacts, keeps edges
-    work = cv2.bilateralFilter(work, d=5, sigmaColor=30, sigmaSpace=5)
+    # 1. Mild bilateral denoise — lighter pass so it doesn't smooth texture
+    work = cv2.bilateralFilter(work, d=3, sigmaColor=20, sigmaSpace=3)
 
-    # 2. Unsharp mask: amount=1.0, threshold=0
-    blurred = cv2.GaussianBlur(work, (0, 0), sigmaX=1.5)
+    # 2. Unsharp mask
+    blurred = cv2.GaussianBlur(work, (0, 0), sigmaX=1.2)
     work = cv2.addWeighted(work, 1.8, blurred, -0.8, 0)
     work = np.clip(work, 0, 255).astype(np.uint8)
 
     # 3. CLAHE on L channel only (avoids colour shifts)
     lab = cv2.cvtColor(work, cv2.COLOR_BGR2LAB)
     l, a, b = cv2.split(lab)
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(4, 4))
+    clahe = cv2.createCLAHE(clipLimit=1.5, tileGridSize=(8, 8))
     l = clahe.apply(l)
     work = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
-    return cv2.resize(work, (w, h)) if min(h, w) < 128 else work
+    # Return at the upscaled size — caller gets a larger image, not a sharpened
+    # copy at the original tiny size.
+    return work
 
 
 class FrameProcessor:
@@ -92,21 +102,32 @@ class FrameProcessor:
                  anti_spoof: AntiSpoofChecker, face_search: FaissSearch,
                  publisher, snapshot_dir: str = "/app/snapshots",
                  mjpeg_server=None, id_to_name: dict | None = None,
-                 mask_detector: MaskDetector | None = None):
+                 mask_detector: MaskDetector | None = None,
+                 face_aligner: MediaPipeFaceAligner | None = None):
         self.camera_id = camera_id
         self.direction = direction
         self.detector = detector
         self.recognizer = recognizer
         self.anti_spoof = anti_spoof
         self.mask_detector = mask_detector or MaskDetector()
+        self.face_aligner  = face_aligner   # None = disabled (mediapipe not installed)
         self.face_search = face_search
         self.publisher = publisher
         self.snapshot_dir = snapshot_dir
+        self.cctv_mode      = bool(config.get("cctv_mode", False))
+        # skip_antispoof: disable liveness check for cameras where the heuristic
+        # fallback produces 100% false positives (CCTV/DVR compressed streams).
+        self.skip_antispoof = bool(config.get("skip_antispoof", False))
+        # detect_bags: run YOLO object detection each frame for bags/suitcases.
+        self.detect_bags    = bool(config.get("detect_bags", True))
         self.cooldown_s = config.get("cooldown_seconds", 300)
         # Minimum det_score to still attempt mask detection on a low-confidence face.
         # Faces above min_det_score go through normal recognition; faces between
         # mask_det_min and min_det_score are only checked for mask/covering.
         self.mask_det_min = float(config.get("mask_det_min", 0.25))
+        self.recognition_threshold = float(
+            config.get("recognition_threshold", face_search.threshold)
+        )
         # Separate, shorter cooldown for mask alerts so repeated alerts are suppressed
         # but a fresh alert fires again within a reasonable window (default 60 s).
         self.mask_cooldown_s = float(config.get("mask_cooldown_seconds", 60))
@@ -126,6 +147,11 @@ class FrameProcessor:
         self._track_obs: dict[int, list[dict]] = {}
         self._frame_count = 0
         self._last_log = 0.0
+        # Full-frame face sweep cache — SCRFD runs on the entire frame once per
+        # inference cycle so all confirmed tracks can use the result without
+        # repeating an expensive full-frame detection.
+        self._ff_faces: list = []   # cached full-frame faces
+        self._ff_frame_id: int = -1  # frame_count when cache was populated
         self._mjpeg = mjpeg_server
         self._id_to_name: dict[str, str] = id_to_name if id_to_name is not None else {}
         self._track_labels: dict[int, tuple[str, tuple]] = {}
@@ -151,29 +177,23 @@ class FrameProcessor:
             _MJPEG_EXECUTOR.submit(self._encode_and_push, frame)
 
     async def process(self, frame: np.ndarray, ts: float):
-        # MJPEG is pushed from the dispatch-thread callback before this coroutine
-        # is even scheduled, so we don't touch it here.
-
-        # Drop frame for inference if previous inference is still running.
-        if self._busy:
-            return
-        self._busy = True
+        # _busy is set True by the dispatch thread before scheduling this coroutine.
+        # The finally block releases it so the next frame can be scheduled.
         try:
             loop = asyncio.get_running_loop()
             events = await loop.run_in_executor(_INFERENCE_EXECUTOR, self._process_sync, frame, ts)
         finally:
-            # Release the busy gate as soon as inference is done — NOT after HTTP publish.
             self._busy = False
 
         for event in events:
-            asyncio.ensure_future(self.publisher.publish(event))
+            asyncio.create_task(self.publisher.publish(event))
 
     def _process_sync(self, frame: np.ndarray, ts: float) -> list[dict]:
         events: list[dict] = []
         self._frame_count += 1
 
         tracks = self.detector.track(frame)
-        self._last_tracks = tracks  # cache for MJPEG overlay on dropped frames
+        self._last_tracks = tracks
         for t in tracks:
             self._track_seen[t.track_id] = ts
 
@@ -185,36 +205,175 @@ class FrameProcessor:
             )
             self._last_log = ts
 
+        # ── Bag / suspicious object detection ────────────────────────────────
+        # Runs every 15 frames (~1.5s at 10fps) to avoid GPU contention with
+        # the face recognition pipeline. Only fires when a person is present.
+        if self.detect_bags and tracks and self._frame_count % 15 == 0:
+            try:
+                objects = self.detector.detect_objects(frame)
+                for obj in objects:
+                    # Alert if the object overlaps or is near any person track.
+                    # Margin = 60% of person width/height so it scales with
+                    # frame resolution and camera distance (staircase vs. kiosk).
+                    ox = (obj.bbox[0] + obj.bbox[2]) / 2
+                    oy = (obj.bbox[1] + obj.bbox[3]) / 2
+                    near_person = False
+                    for t in tracks:
+                        pw = t.bbox[2] - t.bbox[0]
+                        ph = t.bbox[3] - t.bbox[1]
+                        mx, my = max(60, pw * 0.6), max(60, ph * 0.6)
+                        if (t.bbox[0] - mx <= ox <= t.bbox[2] + mx and
+                                t.bbox[1] - my <= oy <= t.bbox[3] + my):
+                            near_person = True
+                            break
+                    if near_person:
+                        snap = self._save_snapshot(frame, None, ts, is_unknown=True)
+                        log.info("[%s] %s detected near person (conf=%.2f)",
+                                 self.camera_id, obj.label, obj.confidence)
+                        events.append({
+                            "type": "suspicious_object",
+                            "camera_id": self.camera_id,
+                            "object_label": obj.label,
+                            "confidence": round(float(obj.confidence), 3),
+                            "snapshot_url": snap,
+                            "timestamp": ts,
+                            "employee_id": None,
+                            "is_live": True,
+                            "spoof_score": 0.0,
+                        })
+            except Exception as exc:
+                log.warning("[%s] bag detection error: %s", self.camera_id, exc)
+
         self._prune_stale(ts)
 
         # All confirmed tracks run recognition for live display.
         # Cooldown only blocks attendance event recording — not label updates.
         confirmed = [t for t in tracks if t.is_confirmed()]
 
+        # ── Synthetic tracks for orphan faces ─────────────────────────────────
+        # When a person is close to the camera (kiosk / desk cam), only their
+        # head+shoulders are visible and YOLO often fails to detect a "person".
+        # But SCRFD still finds the face on the full frame. Run full-frame
+        # detection now and, for any face NOT covered by a YOLO person box,
+        # synthesise a person-track so the recognition loop processes it.
+        # Pseudo track-id is derived from the quantised face position so votes
+        # accumulate across frames for a roughly stationary face.
+        if self._ff_frame_id != self._frame_count:
+            self._ff_faces    = self.recognizer.detect_and_embed(frame)
+            self._ff_frame_id = self._frame_count
+        _H, _W = frame.shape[:2]
+        for _f in self._ff_faces:
+            fx1, fy1, fx2, fy2 = _f[0]
+            cx = (fx1 + fx2) / 2; cy = (fy1 + fy2) / 2
+            covered = False
+            for t in confirmed:
+                tx1, ty1, tx2, ty2 = t.bbox
+                tw = tx2 - tx1; th = ty2 - ty1
+                if (tx1 - tw*0.15) <= cx <= (tx2 + tw*0.15) and \
+                   (ty1 - th*0.15) <= cy <= (ty2 + th*0.15):
+                    covered = True
+                    break
+            if covered:
+                continue
+            fw = fx2 - fx1; fh = fy2 - fy1
+            pb = (max(0, fx1 - fw*0.5), max(0, fy1 - fh*0.5),
+                  min(_W, fx2 + fw*0.5), min(_H, fy2 + fh*0.5))
+            pid = 10_000_000 + int(cy / 100) * 1000 + int(cx / 100)
+            confirmed.append(Track(track_id=pid, bbox=pb, confidence=1.0))
+            self._track_seen[pid] = ts
+
         for tr in confirmed:
             in_cooldown = self._in_cooldown(tr.track_id, ts)
-            crop = self._crop_padded(frame, tr.bbox, pad=0.30)
+
+            # CCTV cameras need more padding — at downward angles the head sits
+            # above the YOLO person bbox centroid, so 60% padding ensures it's
+            # fully included. Frontal cameras use 30% (enough for close faces).
+            pad       = 0.60 if self.cctv_mode else 0.30
+            crop      = self._crop_padded(frame, tr.bbox, pad=pad)
+            head_crop = self._crop_head(frame, tr.bbox)
             if crop.size == 0:
                 continue
 
-            faces = self.recognizer.detect_and_embed(crop)
+            # ── Full-frame face detection (primary) ───────────────────────────
+            # Already run once before this loop and cached in self._ff_faces.
+            # Do NOT re-run here — that would invoke SCRFD once per track.
+            x1, y1, x2, y2 = map(int, tr.bbox)
+            bw, bh = x2 - x1, y2 - y1
+            exp = 0.15  # small expansion so heads just above the bbox are included
+            ex1 = max(0, int(x1 - bw * exp))
+            ey1 = max(0, int(y1 - bh * exp))
+            ex2 = min(frame.shape[1], int(x2 + bw * exp))
+            ey2 = min(frame.shape[0], int(y2 + bh * exp))
+            faces = [
+                f for f in self._ff_faces
+                if ex1 <= int((f[0][0] + f[0][2]) / 2) <= ex2
+                and ey1 <= int((f[0][1] + f[0][3]) / 2) <= ey2
+            ]
+            face_from_full = bool(faces)
+
+            # Fallback: head crop / full crop (for distant faces the full-frame
+            # pass may under-resolve, e.g. someone far down a staircase).
+            # fallback_crop is LOCAL to this loop iteration — never shared across tracks.
+            fallback_crop = None
             if not faces:
+                primary = head_crop if self.cctv_mode else crop
+                faces = self.recognizer.detect_and_embed(primary) if primary.size > 0 else []
+                face_from_full = False
+                fallback_crop = primary
+
+            if not faces:
+                if self._frame_count % 30 == 0:
+                    log.info("[%s] no face for track=%d (full-frame faces=%d, person %dx%d)",
+                             self.camera_id, tr.track_id, len(self._ff_faces), bw, bh)
                 continue
 
-            # Pick the highest-quality face in the crop
+            # Pick the highest-quality face
             bbox, embedding, det_score = max(faces, key=lambda f: f[2])
 
-            face_img = self._crop(crop, bbox)
+            # Extract the face image from the correct coordinate space:
+            # full-frame bbox → crop from `frame`; fallback bbox → crop from the
+            # crop image it was detected in.
+            if face_from_full:
+                face_img = self._crop(frame, bbox)
+            else:
+                face_img = self._crop(fallback_crop, bbox)
+
+            if self._frame_count % 5 == 0:
+                log.debug("[%s] track=%d ff=%s det=%.3f face=%dx%d",
+                          self.camera_id, tr.track_id, face_from_full,
+                          det_score, face_img.shape[1] if face_img.size > 0 else 0,
+                          face_img.shape[0] if face_img.size > 0 else 0)
 
             # ── Face-quality gate: skip junk crops that yield garbage embeddings ──
-            # Low-confidence detections (mask_det_min ≤ score < min_det_score) still
-            # get a mask check — a face mask causes exactly this kind of score drop.
             if det_score < self.min_det_score:
+                if self._frame_count % 30 == 0:
+                    log.info("[%s] face det_score=%.3f below min=%.2f (track=%d)",
+                             self.camera_id, det_score, self.min_det_score, tr.track_id)
                 if det_score >= self.mask_det_min and face_img.size > 0:
                     is_masked, mask_conf = self.mask_detector.check(face_img)
                     if is_masked:
                         self._handle_masked(tr.track_id, face_img, mask_conf, ts, events)
                 continue
+
+            # ── Minimum face size gate ────────────────────────────────────────
+            # SCRFD at det_thresh=0.3 detects false positives (texture patches)
+            # that pass the det_score gate but are too small to be real faces.
+            # At 1080P main stream, real faces are ≥80 px wide; anything smaller
+            # is too distant/blurry to be useful for recognition or the log.
+            fh, fw = face_img.shape[:2]
+            if fh < 80 or fw < 80:
+                continue
+
+            # ── MediaPipe head-pose filter + alignment ────────────────────────
+            # Rejects side-profile frames and warps accepted faces to the
+            # canonical ArcFace 112×112 alignment before embedding.
+            # Skipped transparently when mediapipe is not installed.
+            if self.face_aligner is not None and self.face_aligner.available:
+                face_img, is_frontal = self.face_aligner.process(face_img)
+                if self._frame_count % 5 == 0:
+                    log.debug("[%s] MediaPipe frontal=%s track=%d", self.camera_id, is_frontal, tr.track_id)
+                if not is_frontal:
+                    continue   # angled face — don't pollute the vote buffer
 
             # ── Budget-camera face enhancement + neural SR ────────────────────
             # Pipeline: FSRCNN 2x SR → bilateral denoise → unsharp → CLAHE.
@@ -239,14 +398,38 @@ class FrameProcessor:
                 self._handle_masked(tr.track_id, face_img, mask_conf, ts, events)
                 continue
 
-            is_live, spoof_score = self.anti_spoof.check(crop, bbox, track_id=tr.track_id)
+            if self.skip_antispoof:
+                # Liveness check disabled for this camera — heuristic fallback
+                # produces false positives on CCTV/DVR compressed streams.
+                # Mask detection remains active (separate path).
+                is_live, spoof_score = True, 1.0
+            else:
+                # bbox coords are relative to `frame` when face_from_full, else to fallback_crop
+                _spoof_src = frame if face_from_full else fallback_crop
+                is_live, spoof_score = self.anti_spoof.check(_spoof_src, bbox, track_id=tr.track_id)
             emp_id, score = self.face_search.search_raw(np.asarray(embedding))
+
+            # Padded face crop for snapshot — includes forehead, ears, chin.
+            # bbox is in full-frame coords when the face came from the full-frame
+            # pass, else in person-crop coords.
+            _snap_src = frame if face_from_full else (fallback_crop if fallback_crop is not None else crop)
+            face_snap = self._crop_padded(_snap_src, bbox, pad=0.60)
+            # Apply exposure fix + enhancement to the snapshot crop so security
+            # footage is clear regardless of lighting or camera quality.
+            if face_snap.size > 0:
+                face_snap = self._fix_exposure(face_snap)
+                face_snap = _enhance_face(face_snap)
+                # 2× upscale snapshot before save — Lanczos fallback when FSRCNN
+                # unavailable; still gives more pixels for the display thumbnail.
+                if self._face_sr:
+                    face_snap = self._face_sr.upscale(face_snap)
 
             obs = {
                 "emp_id": emp_id, "score": float(score),
                 "is_live": bool(is_live), "spoof_score": float(spoof_score),
                 "det_score": float(det_score), "face_img": snap_face,
-                "person_crop": crop,  # wider shot — used for the saved snapshot
+                "face_snap": face_snap,   # padded + enhanced crop for detection log
+                "person_crop": crop,
                 "ts": ts,
             }
             buf = self._track_obs.setdefault(tr.track_id, [])
@@ -341,7 +524,7 @@ class FrameProcessor:
     def _decide(self, track_id: int, buf: list[dict], ts: float):
         n = len(buf)
         majority = max(2, math.ceil(n / 2))
-        threshold = self.face_search.threshold
+        threshold = getattr(self, "recognition_threshold", self.face_search.threshold)
 
         # 1) Spoof — fire if liveness fails in 40% or more of frames.
         # Raised from ceil(n/4) to ceil(n/2.5) so a single frame with a transient
@@ -355,7 +538,8 @@ class FrameProcessor:
             log.warning(f"[{self.camera_id}] SPOOF confirmed track={track_id} "
                         f"({len(spoof_obs)}/{n} frames, score={rep['spoof_score']:.3f})")
             self._track_labels[track_id] = ("SPOOF", _CLR_SPOOF)
-            snap = self._save_snapshot(rep.get("person_crop", rep["face_img"]), None, ts, is_unknown=True)
+            best_snap = max(buf, key=lambda o: o["det_score"])
+            snap = self._save_snapshot(best_snap.get("face_snap", best_snap.get("face_img")), None, ts, is_unknown=True, already_enhanced=True)
             return {
                 "type": "spoof_attempt", "camera_id": self.camera_id,
                 "track_id": track_id, "timestamp": ts, "snapshot_url": snap,
@@ -376,16 +560,18 @@ class FrameProcessor:
             wmean = float(np.mean(votes[winner]))
             if wcount >= majority and wmean >= threshold:
                 name = self._id_to_name.get(str(winner), str(winner)[:8])
-                best = max((o for o in live if o["emp_id"] == winner), key=lambda o: o["score"])
+                # Best frame for snapshot = highest det_score (clearest face),
+                # not highest similarity score (which is for recognition quality).
+                best_snap = max(buf, key=lambda o: o["det_score"])
                 log.info(f"[{self.camera_id}] RECOGNIZED {name} (emp={winner}) "
                          f"votes={wcount}/{n} mean_sim={wmean:.3f}")
                 self._track_labels[track_id] = (name, _CLR_KNOWN)
-                snap = self._save_snapshot(best.get("person_crop", best["face_img"]), winner, ts)
+                snap = self._save_snapshot(best_snap.get("face_snap", best_snap.get("face_img")), winner, ts, already_enhanced=True)
                 return {
                     "type": "recognition", "camera_id": self.camera_id,
                     "direction": self.direction, "track_id": track_id,
                     "employee_id": winner, "confidence": round(wmean, 4),
-                    "is_live": True, "spoof_score": round(best["spoof_score"], 4),
+                    "is_live": True, "spoof_score": round(best_snap["spoof_score"], 4),
                     "embedding_dist": round(1 - wmean, 5), "snapshot_url": snap,
                     "timestamp": ts,
                 }
@@ -396,19 +582,21 @@ class FrameProcessor:
         # 3) Unknown — window full (or no candidates) and nobody won
         if n < self.vote_window:
             return None
-        best = max(buf, key=lambda o: o["score"])
+        # Pick clearest frame for snapshot (highest det_score = best face quality)
+        best_snap = max(buf, key=lambda o: o["det_score"])
+        best_score = max(buf, key=lambda o: o["score"])
         if self.face_search.index is None or self.face_search.index.ntotal == 0:
             log.warning(f"[{self.camera_id}] face seen but FAISS index EMPTY — enroll employees first.")
         else:
             log.info(f"[{self.camera_id}] UNKNOWN confirmed track={track_id} "
-                     f"(best_sim={best['score']:.3f}, threshold={threshold})")
+                     f"(best_sim={best_score['score']:.3f}, threshold={threshold})")
         self._track_labels[track_id] = ("Unknown", _CLR_UNKNOWN)
-        snap = self._save_snapshot(best.get("person_crop", best["face_img"]), None, ts, is_unknown=True)
+        snap = self._save_snapshot(best_snap.get("face_snap", best_snap.get("face_img")), None, ts, is_unknown=True, already_enhanced=True)
         return {
             "type": "unknown_person", "camera_id": self.camera_id,
             "direction": self.direction, "track_id": track_id,
-            "employee_id": None, "confidence": round(best["score"], 4),
-            "is_live": True, "spoof_score": round(best["spoof_score"], 4),
+            "employee_id": None, "confidence": round(best_score["score"], 4),
+            "is_live": True, "spoof_score": round(best_snap["spoof_score"], 4),
             "snapshot_url": snap, "timestamp": ts,
         }
 
@@ -425,7 +613,7 @@ class FrameProcessor:
             # window.  Keep SPOOF on screen so the overlay doesn't immediately flip to
             # the employee name while the attacker holds the phone up.
             self._track_labels[track_id] = ("SPOOF", _CLR_SPOOF)
-        elif obs["emp_id"] is not None and obs["score"] >= self.face_search.threshold:
+        elif obs["emp_id"] is not None and obs["score"] >= self.recognition_threshold:
             name = self._id_to_name.get(str(obs["emp_id"]), str(obs["emp_id"])[:8])
             # Green = confident match above threshold
             self._track_labels[track_id] = (name, _CLR_KNOWN)
@@ -531,6 +719,27 @@ class FrameProcessor:
         return img[y1:y2, x1:x2]
 
     @staticmethod
+    def _crop_head(img, bbox) -> np.ndarray:
+        """Crop the upper 40% of the person bbox (head + shoulders).
+
+        For CCTV/overhead cameras the face sits in the top portion of the
+        person bounding box. Giving SCRFD a head-focused crop instead of the
+        full body crop dramatically improves face detection at downward angles.
+        A 15% horizontal pad is added so the full head width is included.
+        """
+        x1, y1, x2, y2 = map(int, bbox)
+        bh = y2 - y1
+        bw = x2 - x1
+        head_y2 = y1 + int(bh * 0.40)       # top 40% = head + shoulders
+        px = int(bw * 0.15)                  # 15% horizontal padding
+        h, w = img.shape[:2]
+        x1c = max(0, x1 - px)
+        x2c = min(w, x2 + px)
+        y1c = max(0, y1)
+        y2c = min(h, head_y2)
+        return img[y1c:y2c, x1c:x2c]
+
+    @staticmethod
     def _crop_padded(img, bbox, pad: float = 0.30):
         """Crop with percentage padding so the full head is always included."""
         x1, y1, x2, y2 = map(int, bbox)
@@ -566,13 +775,16 @@ class FrameProcessor:
                               for i in range(256)], dtype=np.uint8)
             img = cv2.LUT(img, table)
 
-        # CLAHE on each BGR channel independently to restore local contrast.
+        # CLAHE on L channel only (LAB) — avoids the colour shifts that
+        # per-channel CLAHE causes on skin tones (purple/green tinting).
         clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(4, 4))
-        b, g, r = cv2.split(img)
-        img = cv2.merge([clahe.apply(b), clahe.apply(g), clahe.apply(r)])
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        img = cv2.cvtColor(cv2.merge([clahe.apply(l_ch), a_ch, b_ch]), cv2.COLOR_LAB2BGR)
         return img
 
-    def _save_snapshot(self, img, emp_id, ts, is_unknown: bool = False) -> str:
+    def _save_snapshot(self, img, emp_id, ts, is_unknown: bool = False,
+                       already_enhanced: bool = False) -> str:
         if is_unknown:
             d = os.path.join(self.snapshot_dir, "unknown")
         else:
@@ -583,19 +795,25 @@ class FrameProcessor:
             if img is None or img.size == 0:
                 return path
 
-            # 1. Fix dark / underexposed frames before saving.
-            img = self._fix_exposure(img)
+            if not already_enhanced:
+                # Fix dark / underexposed frames, then enhance texture.
+                img = self._fix_exposure(img)
+                img = _enhance_face(img)
 
-            # 2. Enforce a minimum display size so log thumbnails are readable.
-            #    320px is the smallest that shows face detail clearly in a grid.
+            # 3. Enforce a minimum display size — 1024px for crisp log thumbnails
+            #    at 1080P source quality. Larger base → less interpolation damage.
             h, w = img.shape[:2]
-            if h < 320 or w < 320:
-                scale = max(320 / h, 320 / w)
+            if h < 1024 or w < 1024:
+                scale = max(1024 / h, 1024 / w)
                 img = cv2.resize(img, (int(w * scale), int(h * scale)),
                                  interpolation=cv2.INTER_LANCZOS4)
+                # Sharpening pass after final upscale to recover edge crispness.
+                blurred = cv2.GaussianBlur(img, (0, 0), sigmaX=1.0)
+                img = cv2.addWeighted(img, 1.6, blurred, -0.6, 0)
+                img = np.clip(img, 0, 255).astype(np.uint8)
 
-            # 3. Save at high quality — 95 is near-lossless for faces.
-            cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            # 4. Save at high quality.
+            cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 97])
         except Exception:
             pass
         return path

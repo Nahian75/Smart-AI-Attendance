@@ -71,6 +71,7 @@ export interface Camera {
   camera_role: string;
   camera_zone: string | null;
   is_restricted: boolean;
+  is_active: boolean;
   last_seen_at: string | null;
 }
 
@@ -98,9 +99,3 @@ export interface ComplianceRow {
   on_time_pct: number;
 }
 
-export interface PresenceRow {
-  employee_id: string;
-  name: string;
-  dept: string | null;
-  working_hours: number | null;
-}

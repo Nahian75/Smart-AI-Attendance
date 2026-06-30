@@ -100,7 +100,7 @@ async def update_alert_config(
     settings_update: AlertSettingsUpdate,
     password_check: AdminPasswordCheck,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(role_required("admin")),
 ):
     """Update alert configuration settings. Requires admin password verification."""
     config = await db.get(AlertConfig, user.tenant_id)
@@ -197,7 +197,7 @@ async def update_blacklist_status(
     blacklist_update: BlacklistEmployeeUpdate,
     password_check: AdminPasswordCheck,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(role_required("admin")),
 ):
     """Update employee blacklist status. Requires admin password verification."""
     employee = await db.get(Employee, employee_id)
@@ -242,7 +242,7 @@ async def update_restricted_status(
     restricted_update: RestrictedCameraUpdate,
     password_check: AdminPasswordCheck,
     db: AsyncSession = Depends(get_db),
-    user: CurrentUser = Depends(get_current_user),
+    user: CurrentUser = Depends(role_required("admin")),
 ):
     """Update camera restricted area status. Requires admin password verification."""
     camera = await db.get(Camera, camera_id)

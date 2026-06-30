@@ -30,6 +30,11 @@ Screen backlight emits spatially uniform light: a phone held to the camera has v
 ### Why spoof voting fires at majority-1 frames?
 The MiniFASNet model assigns P(live) scores that vary per frame — a phone held at an angle may score above the threshold 2 out of 5 times. Using strict majority (ceil(n/2)) allowed these marginal attacks through. Firing at `max(1, majority-1)` requires only one less spoof frame to trigger, catching phone replays that occasionally fool the model.
 
+### Why MediaPipe for head-pose filtering instead of a custom model?
+MediaPipe Face Mesh gives 468 3D landmarks from a single 50 KB TFLite model in ~5–8 ms on CPU. The key insight is that we don't need exact angle degrees — we only need a reliable relative measure. Normalising nose-tip displacement by inter-eye distance gives a pose proxy that's invariant to face size and works on 80–200 px crops. A similarity transform from the 5 key points (eyes, nose, mouth corners) warps the face to the same positions ArcFace was trained on, eliminating the random ~15° rotation and scale variance that degrades similarity scores. The result is each vote in the buffer comes from a geometrically consistent input — raising mean similarity 5–15% on entry-gate cameras where people walk in at angles.
+
+`static_image_mode=True` is used instead of video mode because we pass cropped face images (not full frames) from potentially different people across cameras — temporal tracking across crops would give wrong landmark predictions.
+
 ### Why one ONNX Runtime session per model?
 InsightFace `FaceAnalysis.prepare()` loads SCRFD + ArcFace into a single session. Sharing across cameras via the shared `ArcFaceRecognizer` instance avoids loading 500 MB of weights multiple times. `_INFERENCE_EXECUTOR(max_workers=1)` in `frame_processor.py` serialises inference calls so models are used from one thread at a time (CUDA sessions are not thread-safe).
 
@@ -68,13 +73,18 @@ edge/src/
   utils/gpu.py                 Runtime GPU detection — single source of truth for ORT providers + torch device
   utils/superres.py            FaceSuperRes: FSRCNN x2 via cv2.dnn_superres; Lanczos fallback
   detection/yolo_detector.py   YOLOv11 track() with ByteTrack; device from gpu.py
-  recognition/arcface.py       InsightFace ArcFace R100; auto det_size from camera resolution
-  recognition/anti_spoof.py    MiniFASNet ONNX (print+replay, 1.5× bbox crop, 128×128 RGB, /255)
-                                + heuristic: Laplacian(28%) + gradient(22%) + saturation(15%)
-                                           + FFT(10%) + luminance_patch_variance(25%)
-                                Spoof voting fires at majority-1 frames (stricter than majority)
-  recognition/faiss_search.py  Top-K cosine search with per-employee mean aggregation; search_raw() for voting
-  pipeline/frame_processor.py  Full pipeline: quality gate → anti-spoof → FSRCNN SR → enhance → embed → vote
+  recognition/arcface.py          InsightFace ArcFace R100; auto det_size from camera resolution
+  recognition/anti_spoof.py       MiniFASNet ONNX (print+replay, 1.5× bbox crop, 128×128 RGB, /255)
+                                   + heuristic: Laplacian(28%) + gradient(22%) + saturation(15%)
+                                              + FFT(10%) + luminance_patch_variance(25%)
+                                   Spoof voting fires at majority-1 frames (stricter than majority)
+  recognition/mediapipe_align.py  MediaPipeFaceAligner: head-pose filter (yaw/pitch via nose displacement)
+                                   + 5-point similarity transform to 112×112 ArcFace canonical alignment
+                                   Shared across all cameras (static_image_mode=True, stateless per call)
+                                   Thresholds: mp_max_yaw (default 40°), mp_max_pitch (default 30°)
+                                   Gracefully disabled if mediapipe not installed
+  recognition/faiss_search.py     Top-K cosine search with per-employee mean aggregation; search_raw() for voting
+  pipeline/frame_processor.py     Full pipeline: quality gate → pose filter+align → anti-spoof → SR → enhance → embed → vote
   pipeline/event_publisher.py  Posts all event types (recognition, unknown, spoof) to backend + Redis
   config/camera_config.yaml    5 camera quality profiles; all recognition thresholds; no rebuild needed
   weights/antispoof_128.onnx   MiniFASNet print+replay model (1.85 MB) — downloaded
@@ -118,8 +128,11 @@ Frame arrives from RTSPReader
                                    └─ FaceSuperRes.upscale(face_crop)  ← FSRCNN x2 neural SR
                                         └─ _enhance_face(sr_face)      ← bilateral+unsharp+CLAHE
                                              └─ ArcFaceRecognizer.detect_and_embed(enhanced)
-                                                  └─ FaissSearch.search_raw(embedding)
-                                                       → (best_emp, score)  ← no threshold yet
+                                             └─ MediaPipeFaceAligner.process(face_img)
+                                                  ├─ too angled → SKIP frame (not added to vote buffer)
+                                                  └─ aligned 112×112 crop (similarity transform)
+                                                       └─ FaissSearch.search_raw(embedding)
+                                                            → (best_emp, score)  ← no threshold yet
                                                             └─ Append to per-track vote buffer
                                                                  └─ buffer.len >= min_votes?
                                                                       └─ _decide()
@@ -178,6 +191,55 @@ if len(spoof_obs) >= spoof_threshold:
 - ArcFace sees the upscaled+enhanced crop — more pixels = better 512-d embedding
 
 **Fallback:** If `cv2.dnn_superres` is unavailable or model missing, `FaceSuperRes.upscale()` falls back to `cv2.resize(..., INTER_LANCZOS4)` silently.
+
+---
+
+## MediaPipe Face Alignment Details
+
+**Module:** `edge/src/recognition/mediapipe_align.py`  
+**Dependency:** `mediapipe==0.10.35` (already in `edge/requirements.txt`)
+
+### Head-pose estimation
+
+Uses normalised nose-tip displacement relative to the eye midpoint:
+
+```
+nose_dx = (nose_tip.x - eye_mid.x) / eye_dist   # yaw proxy   — 0 = frontal
+nose_dy = (nose_tip.y - eye_mid.y) / eye_dist   # pitch proxy  — ~0.5 = frontal
+```
+
+| Condition | Meaning | Action |
+|---|---|---|
+| `abs(nose_dx) > 0.35` | Yaw > ~40° (face turned left/right) | Skip frame |
+| `nose_dy < 0.10` | Extreme upward tilt | Skip frame |
+| `nose_dy > 0.75` | Extreme downward tilt | Skip frame |
+
+Tune via `camera_config.yaml`: `mp_max_yaw` and `mp_max_pitch`.
+
+### 5-point alignment
+
+Key landmarks used:
+| Point | Face Mesh indices |
+|---|---|
+| Left eye centre | avg(33, 133) |
+| Right eye centre | avg(362, 263) |
+| Nose tip | 4 |
+| Left mouth corner | 61 |
+| Right mouth corner | 291 |
+
+`cv2.estimateAffinePartial2D(src, dst, method=LMEDS)` computes a 4-DOF similarity transform (uniform scale + rotation + translation — no shear). Output is a 112×112 crop with eyes, nose, and mouth at the canonical positions ArcFace was trained on.
+
+### Pipeline position
+
+```
+quality gate → [MediaPipe: pose check → warp] → mask check → anti-spoof → SR → enhance → re-embed → vote
+```
+
+Placed **before** enhancement: the aligner produces a geometrically correct crop; enhancement then sharpens it. Both steps feed the same `detect_and_embed` re-embed call.
+
+### Graceful degradation
+
+If `mediapipe` is not installed, `_init_mesh()` catches the `ImportError` and sets `self._mesh = None`. `FrameProcessor` checks `face_aligner.available` before calling — frames pass through completely unchanged. No code path breaks.
 
 ---
 
@@ -274,6 +336,9 @@ C:\Users\ANTS-Pc\.conda\envs\mouza_processor_venv\python.exe edge_standalone.py
 | **Standalone: GPU not used** | `edge_standalone.py` | Added `detect_gpu()` — CUDA / DirectML / CPU |
 | **Standalone: no reconnect on stream drop** | `edge_standalone.py` | Exponential backoff reconnect loop |
 | **Standalone: embeddings never resynced** | `edge_standalone.py` | Resync every 60 s from backend |
+| **`mask_detector` not passed to `camera_watch_loop`** | `main.py` | Added `mask_detector` parameter — hot-added cameras now get mask detection |
+| **MediaPipe head-pose filter + alignment** | `recognition/mediapipe_align.py`, `frame_processor.py`, `main.py` | New `MediaPipeFaceAligner` — rejects angled frames, warps to canonical 112×112 for ArcFace |
+| **SDK `.so` symlinks breaking Docker build context** | `edge/.dockerignore` | Added `.dockerignore` to exclude `sdk/` (already volume-mounted at runtime) |
 | **Anti-spoof weak on screen replay (H.264)** | `anti_spoof.py` | Added luminance patch variance cue (25% weight) |
 | **Anti-spoof spoof threshold too lenient** | `frame_processor.py` | Fires at `majority - 1` frames (not `majority`) |
 | **No neural SR on face crops** | `frame_processor.py`, `edge_standalone.py` | FSRCNN x2 via `superres.py` before ArcFace embed |

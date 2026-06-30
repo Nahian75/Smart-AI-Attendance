@@ -17,21 +17,21 @@ export default function OccupancyCards() {
   }, []);
 
   if (error) return (
-    <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center text-xs text-gray-400 dark:text-gray-500">
+    <div className="glass rounded-xl p-4 text-center text-xs text-gray-400 dark:text-gray-500">
       Occupancy unavailable
     </div>
   );
 
   return (
     <div className="space-y-2">
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 flex items-center justify-between">
+      <div className="glass rounded-xl p-4 flex items-center justify-between">
         <div className="flex items-center gap-2 text-sm text-gray-500 dark:text-gray-400">
           <Building2 size={16} /> Building occupancy
         </div>
         <span className="text-2xl font-medium text-green-600 dark:text-green-400">{data.building}</span>
       </div>
       {Object.entries(data.zones).map(([zone, count]) => (
-        <div key={zone} className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 px-4 py-3 flex items-center justify-between">
+        <div key={zone} className="glass rounded-xl px-4 py-3 flex items-center justify-between">
           <div className="flex items-center gap-2 text-xs text-gray-500 dark:text-gray-400">
             <MapPin size={13} /> {zone.replace(/_/g, " ")}
           </div>

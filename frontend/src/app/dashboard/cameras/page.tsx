@@ -1,6 +1,6 @@
 "use client";
 import { useEffect, useState } from "react";
-import { Video, Shield, MapPin, Pencil, Trash2, Calendar } from "lucide-react";
+import { Video, Shield, MapPin, Pencil, Trash2, Calendar, Power, PowerOff, Scan, Wand2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useRole } from "@/lib/rbac";
 import DashboardShell from "@/components/ui/DashboardShell";
@@ -30,17 +30,57 @@ const EMPTY_FORM: FormState = {
 export default function CamerasPage() {
   const { can } = useRole();
   const [cameras, setCameras] = useState<Camera[]>([]);
+  const [showDisabled, setShowDisabled] = useState(false);
+  const [scanning, setScanning] = useState(false);
+  const [scanResults, setScanResults] = useState<{ onvif_url: string | null; rtsp_url: string | null }[]>([]);
+  const [autoConfiguring, setAutoConfiguring] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [error, setError] = useState("");
   const [saving, setSaving] = useState(false);
-  const reload = () => api.cameras().then(setCameras).catch((err) => setError(err.message));
+  const reload = () => api.cameras(showDisabled).then(setCameras).catch((err) => setError(err.message));
   useEffect(() => {
     reload();
     const t = setInterval(reload, 30_000);
     return () => clearInterval(t);
-  }, []);
+  }, [showDisabled]);
+
+  async function scanNetwork() {
+    setScanning(true); setScanResults([]); setError("");
+    try {
+      const res = await api.scanCameras();
+      setScanResults(res.cameras);
+      if (res.count === 0) setError("No ONVIF cameras found on the network. Make sure cameras are on the same LAN and ONVIF is enabled.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Scan failed.");
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function autoConfigure(cam: Camera) {
+    setAutoConfiguring(cam.id); setError("");
+    try {
+      const result = await api.autoConfigure(cam.id);
+      await reload();
+      setError(`✓ Auto-configured: direction=${result.direction}, role=${result.camera_role}, cctv_mode=${result.cctv_mode}. Restart edge node to apply.`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Auto-configure failed.");
+    } finally {
+      setAutoConfiguring(null);
+    }
+  }
+
+  async function toggleCamera(cam: Camera) {
+    setError("");
+    try {
+      await api.toggleCamera(cam.id);
+      await reload();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not toggle camera.");
+    }
+  }
 
   function openNew() {
     setEditingId(null);
@@ -91,7 +131,7 @@ export default function CamerasPage() {
   }
 
   async function removeCamera(cam: Camera) {
-    if (!window.confirm(`Remove camera "${cam.name}"? This cannot be undone.`)) return;
+    if (!window.confirm(`Permanently delete "${cam.name}"?\n\nThis will remove the camera AND all its detection history, alerts, and snapshots. This cannot be undone.`)) return;
     setError("");
     try {
       await api.deleteCamera(cam.id);
@@ -104,17 +144,69 @@ export default function CamerasPage() {
   return (
     <DashboardShell>
       <div className="flex items-center justify-between mb-4">
-        <h2 className="text-lg font-medium">Cameras</h2>
-        {can("admin") && (
-          <button onClick={openNew}
-                  className="text-sm bg-brand text-white px-3 py-1.5 rounded-lg hover:bg-brand-dark">
-            + Add camera
-          </button>
-        )}
+        <h2 className="text-lg font-medium">
+          Cameras
+          <span className="ml-2 text-xs font-normal text-gray-400">
+            {cameras.filter(c => c.is_active).length} active
+            {showDisabled && cameras.filter(c => !c.is_active).length > 0 &&
+              ` · ${cameras.filter(c => !c.is_active).length} disabled`}
+          </span>
+        </h2>
+        <div className="flex items-center gap-2">
+          {can("admin") && (
+            <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={showDisabled}
+                onChange={e => setShowDisabled(e.target.checked)}
+                className="rounded"
+              />
+              Show disabled
+            </label>
+          )}
+          {can("admin") && (
+            <button onClick={scanNetwork} disabled={scanning}
+                    className="flex items-center gap-1.5 text-sm border dark:border-gray-600 px-3 py-1.5 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 dark:text-gray-300 disabled:opacity-50 transition-colors">
+              <Scan size={14} className={scanning ? "animate-spin" : ""} />
+              {scanning ? "Scanning…" : "Scan network"}
+            </button>
+          )}
+          {can("admin") && (
+            <button onClick={openNew}
+                    className="flex items-center gap-1.5 text-sm bg-brand text-white px-3 py-1.5 rounded-lg hover:bg-brand-dark">
+              + Add camera
+            </button>
+          )}
+        </div>
       </div>
-      {error && <div className="mb-4 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700">{error}</div>}
+      {error && <div className={`mb-4 rounded-lg px-3 py-2 text-sm ${error.startsWith("✓") ? "bg-green-50 text-green-700" : "bg-red-50 text-red-700"}`}>{error}</div>}
+
+      {/* Scan results */}
+      {scanResults.length > 0 && (
+        <div className="mb-4 bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-xl p-3">
+          <p className="text-xs font-medium text-blue-700 dark:text-blue-400 mb-2">
+            <Scan size={12} className="inline mr-1" />{scanResults.length} camera{scanResults.length > 1 ? "s" : ""} found on network
+          </p>
+          <div className="space-y-1.5">
+            {scanResults.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs">
+                <span className="font-mono text-gray-600 dark:text-gray-400 truncate flex-1">
+                  {r.rtsp_url || r.onvif_url || "Unknown URL"}
+                </span>
+                {r.rtsp_url && (
+                  <button
+                    onClick={() => { openNew(); setForm(f => ({ ...f, rtsp_url: r.rtsp_url! })); setScanResults([]); }}
+                    className="text-blue-600 dark:text-blue-400 hover:text-blue-800 whitespace-nowrap font-medium">
+                    + Add
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
       {showForm && (
-        <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 mb-4 space-y-3">
+        <div className="glass rounded-xl p-4 mb-4 space-y-3">
           <p className="text-sm font-medium">{editingId ? "Edit camera" : "New camera"}</p>
           <div className="grid grid-cols-2 gap-3">
             {(["name", "location", "rtsp_url", "camera_zone"] as const).map((k) => (
@@ -163,7 +255,7 @@ export default function CamerasPage() {
         </div>
       )}
       {cameras.length === 0 && !error && (
-        <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-10 text-center">
+        <div className="glass rounded-xl p-10 text-center">
           <Video className="mx-auto text-gray-200 dark:text-gray-600 mb-3" size={36} />
           <p className="text-sm font-medium text-gray-500 dark:text-gray-400">No cameras registered yet</p>
           <p className="text-xs text-gray-400 dark:text-gray-500 mt-1">
@@ -174,11 +266,40 @@ export default function CamerasPage() {
 
       <div className="grid grid-cols-2 gap-3">
         {cameras.map((cam) => (
-          <div key={cam.id} className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4">
-            <CameraFeed cameraId={cam.id} direction={cam.direction} status={cam.status} streamOnly />
+          <div key={cam.id} className={`glass rounded-xl p-4 transition-opacity ${!cam.is_active ? "opacity-50" : ""}`}>
+            {cam.is_active
+              ? <CameraFeed cameraId={cam.id} direction={cam.direction} status={cam.status} streamOnly />
+              : (
+                <div className="aspect-video bg-gray-100 dark:bg-gray-700 rounded-lg mb-3 flex flex-col items-center justify-center gap-2">
+                  <PowerOff size={24} className="text-gray-400" />
+                  <span className="text-xs text-gray-400">Camera disabled</span>
+                </div>
+              )
+            }
             <div className="flex items-start justify-between mb-2">
               <span className="font-medium text-sm">{cam.name}</span>
               <div className="flex items-center gap-1">
+                {can("admin") && (
+                  <button
+                    onClick={() => toggleCamera(cam)}
+                    title={cam.is_active ? "Disconnect camera" : "Connect camera"}
+                    className={`p-1 rounded transition-colors ${
+                      cam.is_active
+                        ? "text-green-500 hover:text-red-500 hover:bg-red-50"
+                        : "text-gray-400 hover:text-green-600 hover:bg-green-50"
+                    }`}>
+                    {cam.is_active ? <Power size={14} /> : <PowerOff size={14} />}
+                  </button>
+                )}
+                {can("admin") && cam.is_active && (
+                  <button
+                    onClick={() => autoConfigure(cam)}
+                    title="Auto-configure direction & role from snapshot"
+                    disabled={autoConfiguring === cam.id}
+                    className="p-1 text-gray-400 hover:text-purple-600 disabled:opacity-50">
+                    <Wand2 size={14} className={autoConfiguring === cam.id ? "animate-spin" : ""} />
+                  </button>
+                )}
                 {can("admin") && (
                   <button onClick={() => openEdit(cam)} title="Edit camera"
                           className="p-1 text-gray-400 hover:text-brand"><Pencil size={14} /></button>
@@ -187,8 +308,8 @@ export default function CamerasPage() {
                   <button onClick={() => removeCamera(cam)} title="Remove camera"
                           className="p-1 text-gray-400 hover:text-red-600"><Trash2 size={14} /></button>
                 )}
-                <span className={`text-xs px-2 py-0.5 rounded-full ${STATUS_COLOR[cam.status] || STATUS_COLOR.offline}`}>
-                  {STATUS_LABEL[cam.status] || cam.status}
+                <span className={`text-xs px-2 py-0.5 rounded-full ${cam.is_active ? (STATUS_COLOR[cam.status] || STATUS_COLOR.offline) : "bg-gray-100 text-gray-400"}`}>
+                  {cam.is_active ? (STATUS_LABEL[cam.status] || cam.status) : "Disabled"}
                 </span>
               </div>
             </div>

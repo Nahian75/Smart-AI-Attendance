@@ -147,6 +147,12 @@ class AntiSpoofChecker:
         hist = cv2.calcHist([gray], [0], None, [32], [0, 256]).flatten()
         hist /= hist.sum() + 1e-6
 
+        # Evict stale entries: keep only the most recent 1000 track IDs.
+        # In a 24-hour session with 5 tracks/min this caps memory at ~1000 entries.
+        if len(self._temporal) > 1000:
+            oldest = next(iter(self._temporal))
+            self._temporal.pop(oldest, None)
+
         state = self._temporal.setdefault(track_id, {"prev_hist": None, "static_count": 0})
         if state["prev_hist"] is not None:
             diff = float(np.sum(np.abs(hist - state["prev_hist"])))

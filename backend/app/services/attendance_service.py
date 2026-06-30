@@ -37,7 +37,35 @@ class AttendanceService:
     # ── Main entry point ───────────────────────────────────────────────────
     async def process_recognition_event(self, event: dict, tenant_id: uuid.UUID) -> dict:
         conf = float(event.get("confidence", 0))
-        camera_id = uuid.UUID(str(event["camera_id"])) if event.get("camera_id") else None
+        try:
+            camera_id = uuid.UUID(str(event["camera_id"])) if event.get("camera_id") else None
+        except (ValueError, KeyError):
+            camera_id = None
+
+        # ── Suspicious object event (bag, suitcase, backpack near person) ──
+        if event.get("type") == "suspicious_object":
+            label = event.get("object_label", "suspicious object")
+            cam = await self.db.get(Camera, camera_id) if camera_id else None
+            cam_name = cam.name if cam else str(camera_id)
+            await self.alerts.fire(
+                tenant_id, "suspicious_object",
+                f"{label.capitalize()} detected near person on camera {cam_name}",
+                camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
+            )
+            await self.db.commit()
+            return {"action": "skip", "reason": "suspicious_object", "label": label}
+
+        # ── Masked face event ──────────────────────────────────────────────
+        if event.get("type") == "masked_face":
+            cam = await self.db.get(Camera, camera_id) if camera_id else None
+            cam_name = cam.name if cam else str(camera_id)
+            await self.alerts.fire(
+                tenant_id, "masked_face",
+                f"Face mask detected on camera {cam_name}",
+                camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
+            )
+            await self.db.commit()
+            return {"action": "skip", "reason": "masked_face"}
 
         # PRD §6.3: liveness gate at 0.80
         if not event.get("is_live", True):
@@ -72,7 +100,10 @@ class AttendanceService:
             await self.db.commit()
             return {"action": "skip", "reason": "unknown_person", "confidence": conf}
 
-        emp_id = uuid.UUID(str(event["employee_id"]))
+        try:
+            emp_id = uuid.UUID(str(event["employee_id"]))
+        except (ValueError, KeyError):
+            return {"action": "skip", "reason": "invalid_employee_id"}
         employee = await self.db.get(Employee, emp_id)
         if not employee or not employee.is_active:
             logger.warning("employee_not_found_or_inactive emp=%s", emp_id)
@@ -223,11 +254,7 @@ class AttendanceService:
     # ── Unknown / intruder path (PRD §5.2, §5.3) ──────────────────────────
     async def _handle_unknown(self, event: dict, tenant_id: uuid.UUID, cam):
         from datetime import date as _date
-        try:
-            raw_cam_id = event.get("camera_id")
-            cam_uuid = uuid.UUID(str(raw_cam_id)) if raw_cam_id else None
-        except (ValueError, AttributeError):
-            cam_uuid = None
+        cam_uuid = cam.id if cam else self._safe_uuid(event.get("camera_id"))
         ud = UnknownDetection(
             tenant_id=tenant_id,
             camera_id=cam_uuid,
@@ -250,8 +277,14 @@ class AttendanceService:
             snapshot_url=event.get("snapshot_url"),
         )
 
-        # PRD §5.3: escalate to intruder alert if outside business hours (07:00–20:00 UTC)
-        hour = datetime.now(timezone.utc).hour
+        # PRD §5.3: escalate to intruder alert if outside business hours in local time
+        import pytz as _pytz
+        try:
+            _tz = _pytz.timezone("UTC")  # fallback; replace with branch.timezone when available
+            _now_local = datetime.now(_tz)
+        except Exception:
+            _now_local = datetime.now(timezone.utc)
+        hour = _now_local.hour
         if hour < 7 or hour >= 20:
             await self.alerts.fire(
                 tenant_id, "intruder",
@@ -261,11 +294,20 @@ class AttendanceService:
             )
 
     # ── DB helpers ────────────────────────────────────────────────────────
+    @staticmethod
+    def _safe_uuid(val) -> "uuid.UUID | None":
+        if not val:
+            return None
+        try:
+            return uuid.UUID(str(val))
+        except (ValueError, AttributeError):
+            return None
+
     async def _store_event(self, event: dict, tenant_id: uuid.UUID) -> RecognitionEvent:
         rec = RecognitionEvent(
             tenant_id=tenant_id,
-            camera_id=uuid.UUID(str(event["camera_id"])) if event.get("camera_id") else None,
-            employee_id=uuid.UUID(str(event["employee_id"])) if event.get("employee_id") else None,
+            camera_id=self._safe_uuid(event.get("camera_id")),
+            employee_id=self._safe_uuid(event.get("employee_id")),
             track_id=event.get("track_id"),
             confidence=event.get("confidence", 0),
             is_live=event.get("is_live", True),

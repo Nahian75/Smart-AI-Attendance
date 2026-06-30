@@ -49,12 +49,12 @@ export default function AlertsPage() {
       </div>
       <div className="space-y-2">
         {alerts.length === 0 && (
-          <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-8 text-center text-gray-400 dark:text-gray-500 text-sm">
+          <div className="glass rounded-xl p-8 text-center text-gray-400 dark:text-gray-500 text-sm">
             No alerts {filter === "unacked" ? "requiring action" : "found"}
           </div>
         )}
         {alerts.map((a) => (
-          <div key={a.id} className={`rounded-xl bg-white dark:bg-gray-800 border dark:border-gray-700 p-4 flex items-start gap-3 ${SEV[a.severity] || ""}`}>
+          <div key={a.id} className={`rounded-xl glass p-4 flex items-start gap-3 ${SEV[a.severity] || ""}`}>
             <div className="flex-1">
               <div className="flex items-center gap-2 mb-1">
                 <span className="text-sm font-medium">{TYPE_LABEL[a.type] || a.type}</span>

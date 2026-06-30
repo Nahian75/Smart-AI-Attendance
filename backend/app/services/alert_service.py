@@ -11,6 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import Alert
 from ..config import settings
+from .notification_service import NotificationService
+
+_notifier = NotificationService()
 
 
 SEVERITY = {
@@ -18,6 +21,8 @@ SEVERITY = {
     "blacklist": "high",
     "spoof_attempt": "high",
     "restricted_area": "high",
+    "suspicious_object": "medium",   # bag / suitcase / backpack near person
+    "masked_face": "medium",
     "after_hours": "medium",
     "loitering": "medium",
     "vip": "low",
@@ -68,9 +73,12 @@ class AlertService:
             await self.redis.lpush(f"alerts:recent:{tenant_id}", json.dumps(payload))
             await self.redis.ltrim(f"alerts:recent:{tenant_id}", 0, 99)
 
-        # VIP and blacklist go to Slack as well (PRD §5.3)
+        # Slack: VIP + blacklist (PRD §5.3)
         if alert_type in ("vip", "blacklist") and settings.SLACK_WEBHOOK_URL:
             await self._slack(message, alert_type)
+
+        # Email: all high-severity alerts
+        await self._notify_email(alert_type, message, employee_id, camera_id, snapshot_url)
 
         return alert
 
@@ -82,6 +90,28 @@ class AlertService:
                              json={"text": f"{emoji} *{alert_type.upper()}*: {message}"})
         except Exception:
             pass
+
+    async def _notify_email(self, alert_type: str, message: str,
+                            employee_id, camera_id, snapshot_url):
+        """Send email for high-severity alerts if SMTP is configured."""
+        cam_str = str(camera_id) if camera_id else "unknown"
+        snap    = str(snapshot_url) if snapshot_url else None
+        try:
+            if alert_type == "spoof_attempt":
+                await _notifier.notify_spoof(cam_str, snap)
+            elif alert_type == "intruder":
+                await _notifier.notify_intruder(cam_str, snap)
+            elif alert_type == "blacklist":
+                # employee name isn't available here — use the message which contains it
+                await _notifier.notify_blacklist(message, cam_str, snap)
+            elif alert_type == "after_hours":
+                await _notifier.notify_after_hours(message, cam_str)
+            # low-severity types (vip, unknown_person, loitering, restricted_area)
+            # are not emailed — they already appear in the dashboard and Slack
+        except Exception as e:
+            import logging as _log
+            _log.getLogger(__name__).warning("Email notification failed for %s: %s",
+                                             alert_type, e)
 
     # ── Loitering ──────────────────────────────────────────────────────────
     async def check_loitering(

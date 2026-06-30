@@ -28,12 +28,13 @@ export default function SecurityAlertsPage() {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [filter, setFilter] = useState<"all" | "unacked">("unacked");
 
-  const load = () => api.alerts(filter === "unacked").then(setAlerts).catch(() => {});
-  useEffect(() => { load(); }, [filter]);
+  useEffect(() => {
+    api.alerts(filter === "unacked").then(setAlerts).catch(() => {});
+  }, [filter]);
 
   async function ack(id: string) {
-    await api.acknowledgeAlert(id);
-    setAlerts((prev: AlertItem[]) => prev.map((a) => a.id === id ? { ...a, is_acknowledged: true } : a));
+    await api.acknowledgeAlert(id).catch(() => {});
+    setAlerts((prev) => prev.map((a) => a.id === id ? { ...a, is_acknowledged: true } : a));
   }
 
   const securityAlerts = alerts.filter(a => a.severity === "high" && a.type !== "loitering");
@@ -69,7 +70,7 @@ export default function SecurityAlertsPage() {
         </div>
         <div className="space-y-2">
           {securityAlerts.length === 0 && (
-            <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center text-gray-400 dark:text-gray-500 text-sm">
+            <div className="glass rounded-xl p-4 text-center text-gray-400 dark:text-gray-500 text-sm">
               No security incidents
             </div>
           )}
@@ -108,7 +109,7 @@ export default function SecurityAlertsPage() {
         </div>
         <div className="space-y-2">
           {loiteringAlerts.length === 0 && (
-            <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 p-4 text-center text-gray-400 dark:text-gray-500 text-sm">
+            <div className="glass rounded-xl p-4 text-center text-gray-400 dark:text-gray-500 text-sm">
               No loitering alerts
             </div>
           )}

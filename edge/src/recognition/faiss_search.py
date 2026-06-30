@@ -11,7 +11,7 @@ from collections import defaultdict
 
 
 class FaissSearch:
-    def __init__(self, threshold: float = 0.82, top_k: int = 5):
+    def __init__(self, threshold: float = 0.45, top_k: int = 5):
         import faiss
         self.faiss = faiss
         self.threshold = threshold
@@ -30,10 +30,13 @@ class FaissSearch:
         return self._state[1]
 
     def build(self, embeddings: np.ndarray, employee_ids: list[str]):
-        """embeddings: (N, 512) L2-normalized. Inner product == cosine sim."""
-        d = embeddings.shape[1]
+        """embeddings: (N, 512). Normalized here so IndexFlatIP == cosine sim."""
+        embs = embeddings.astype(np.float32)
+        norms = np.linalg.norm(embs, axis=1, keepdims=True)
+        embs = embs / np.where(norms > 0, norms, 1.0)
+        d = embs.shape[1]
         index = self.faiss.IndexFlatIP(d)
-        index.add(embeddings.astype(np.float32))
+        index.add(embs)
         self._state = (index, employee_ids)
 
     def search_raw(self, embedding: np.ndarray) -> tuple[str | None, float]:
@@ -48,6 +51,9 @@ class FaissSearch:
 
         k = min(self.top_k, index.ntotal)
         q = embedding.astype(np.float32).reshape(1, -1)
+        norm = np.linalg.norm(q)
+        if norm > 0:
+            q = q / norm
         sims, idx = index.search(q, k)
         sims, idx = sims[0], idx[0]
 

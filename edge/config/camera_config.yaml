@@ -1,64 +1,117 @@
 tenant_id: demo
 
 # ── Device ───────────────────────────────────────────────────────────────────
-device: auto              # auto = GPU if available, else CPU
-use_gstreamer: false      # true only on NVIDIA Jetson with HW decoder
+device: auto
+use_gstreamer: false
 yolo_model: yolo11s.pt
 tracker: bytetrack.yaml
-antispoof_model: weights/antispoof_128.onnx
+antispoof_model: edge/weights/antispoof_128.onnx
+mask_model: edge/weights/face_mask_detector.onnx
+
+# det_size: SCRFD face-detector input resolution.
+# Forced to 640 (not auto 960) because the pipeline crops to the person bbox
+# BEFORE face detection — faces arrive as ~450px crops. At det_size 960 these
+# crops get upscaled and SCRFD misses the (now blurry) face. Empirically 640
+# detects faces in cases where 960 finds nothing, with no downside on full
+# frames. Do not raise above 640 unless cameras feed full uncropped frames.
+det_size: 640
 
 # ════════════════════════════════════════════════════════════════════════════
-#  GLOBAL DEFAULTS  (applied to every camera unless overridden below)
-#  Tuned for Hikvision 1080p H.265 via DVR — your majority camera type.
+#  GLOBAL DEFAULTS
 # ════════════════════════════════════════════════════════════════════════════
-recognition_threshold: 0.52
-liveness_threshold: 0.40
-min_det_score: 0.55
+recognition_threshold: 0.45
+liveness_threshold: 0.28
+min_det_score: 0.32
+mask_det_min: 0.25
 enhance_faces: true
 superres: false
 superres_model: edge/weights/FSRCNN_x2.pb
 vote_window: 6
 min_votes: 4
-fps_target: 0             # 0 = auto-detect from stream (recommended)
+fps_target: 0
 vote_ttl_seconds: 8
 cooldown_seconds: 300
+mp_max_yaw: 60.0
+mp_max_pitch: 45.0
+
+# Mask detection threshold — raised from 0.55 to 0.72 to prevent glasses
+# (especially tinted/reflective lenses) from triggering false MASKED alerts.
+# Real surgical/cloth masks produce stronger occlusion signals (>0.72).
+mask_threshold: 0.72
+
+# skip_antispoof: true  = bypass liveness check for this camera.
+#   Use for CCTV/overhead cameras — the heuristic fallback produces near-100%
+#   false-positive rate on DVR-compressed RTSP streams at CCTV angles.
+#   The real MiniFASNet model (if antispoof_128.onnx is present) still works
+#   correctly on frontal cameras.
+#
+# detect_bags: true  = fire suspicious_object alert when YOLO detects a
+#   backpack, handbag, or suitcase near a confirmed person track.
+skip_antispoof: false
+detect_bags: true
 
 # ════════════════════════════════════════════════════════════════════════════
 #  PER-CAMERA PROFILE OVERRIDES
-#  Matched by camera name or rtsp_url (case-insensitive substring).
-#  First match wins. Use the camera name you registered in the dashboard.
 # ════════════════════════════════════════════════════════════════════════════
 camera_profiles:
 
-  # ── Hikvision 1080p H.265 via DVR ────────────────────────────────────────
-  # Matches any camera whose name or URL contains "hik" or "dvr".
-  # H.265 1080p crops are already large and sharp — no SR or enhancement needed.
-  - match: ["hik", "dvr", "hikvision"]
-    recognition_threshold: 0.52
-    liveness_threshold: 0.40
-    min_det_score: 0.55
-    enhance_faces: false    # 1080p H.265 is sharp enough without enhancement
+  # ── Dedicated face-check kiosk / entrance gate ───────────────────────────
+  # Close-range frontal camera. Anti-spoof ON — real spoof attacks happen here.
+  - match: ["kiosk", "gate", "reception", "checkin", "check-in", "lobby"]
+    cctv_mode: false
+    skip_antispoof: false
+    detect_bags: false
+    recognition_threshold: 0.55
+    liveness_threshold: 0.45
+    min_det_score: 0.45
+    enhance_faces: false
     superres: false
 
-  # ── HiVideo budget WiFi camera (H.264, 720p) ─────────────────────────────
-  # Matches any camera whose name or URL contains "hivideo", "hiv", or "v380".
-  # Heavy H.264 compression needs SR + enhancement for reliable recognition.
-  - match: ["hivideo", "hiv", "v380", "wifi"]
-    recognition_threshold: 0.42
-    liveness_threshold: 0.38
-    min_det_score: 0.48
+  # ── Hikvision DVR entrance/exit channels ─────────────────────────────────
+  # Wall-mounted cameras on 1080P main stream. Anti-spoof ON.
+  # min_det_score raised from 0.32 → 0.40 — 1080P crops give stronger signals.
+  - match: ["hik", "dvr", "hikvision", "level 1", "entrance"]
+    cctv_mode: false
+    skip_antispoof: false
+    detect_bags: true
+    recognition_threshold: 0.45
+    liveness_threshold: 0.28
+    min_det_score: 0.40
     enhance_faces: true
-    superres: false         # SR disabled for speed; enhancement alone is enough
+    superres: false
+
+  - match: ["ceiling", "overhead", "cctv", "staircase", "level 2", "interior", "floor"]
+    cctv_mode: true
+    skip_antispoof: true
+    detect_bags: true
+    recognition_threshold: 0.38
+    liveness_threshold: 0.25
+    min_det_score: 0.38
+    enhance_faces: true
+    superres: false
+
+  - match: ["hivideo", "hiv", "v380", "wifi", "ip cam", "ipcam"]
+    cctv_mode: false
+    skip_antispoof: true
+    detect_bags: true
+    recognition_threshold: 0.40
+    liveness_threshold: 0.35
+    min_det_score: 0.30
+    enhance_faces: true
+    superres: false
+
+  # ── Meeting room cameras ──────────────────────────────────────────────────
+  - match: ["meeting", "conference", "boardroom"]
+    cctv_mode: true
+    skip_antispoof: true
+    detect_bags: false
+    recognition_threshold: 0.38
+    liveness_threshold: 0.32
+    min_det_score: 0.22
+    enhance_faces: true
+    superres: false
 
 # ════════════════════════════════════════════════════════════════════════════
-#  CAMERA SOURCES (fallback if backend API is unreachable at startup)
-#
-#  Hikvision via DVR RTSP URL format:
-#    Channel 1 main stream:  rtsp://admin:password@DVR_IP:554/Streaming/Channels/101
-#    Channel 2 main stream:  rtsp://admin:password@DVR_IP:554/Streaming/Channels/201
-#    Sub-stream (avoid):     rtsp://admin:password@DVR_IP:554/Streaming/Channels/102
-#
-#  HiVideo / V380 RTSP URL format:
-#    rtsp://admin:password@CAMERA_IP:554/stream1
+#  CAMERA SOURCES (fallback if backend API unreachable at startup)
 # ════════════════════════════════════════════════════════════════════════════
 cameras: []

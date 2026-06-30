@@ -62,11 +62,14 @@ async def get_current_user(
     payload = decode_token(token_str)
     if not payload:
         raise Unauthorized("Invalid or expired token")
-    return CurrentUser(
-        id=uuid.UUID(payload["sub"]),
-        tenant_id=uuid.UUID(payload["tenant_id"]),
-        role=payload["role"],
-    )
+    try:
+        return CurrentUser(
+            id=uuid.UUID(payload["sub"]),
+            tenant_id=uuid.UUID(payload["tenant_id"]),
+            role=payload["role"],
+        )
+    except (KeyError, ValueError):
+        raise Unauthorized("Malformed token payload")
 
 
 def role_required(minimum: str):

@@ -8,12 +8,15 @@ class RecognitionEventIn(BaseModel):
     employee_id: uuid.UUID | None = None
     direction: str | None = None
     track_id: int | None = None
-    confidence: float
+    confidence: float = 0.0
     is_live: bool = True
     spoof_score: float | None = None
     snapshot_url: str | None = None
     embedding_dist: float | None = None
     timestamp: datetime | None = None
+    # Extended event types from edge node
+    type: str | None = None          # suspicious_object | masked_face | recognition | etc.
+    object_label: str | None = None  # backpack | handbag | suitcase (for suspicious_object)
 
 
 class AttendanceLogOut(BaseModel):

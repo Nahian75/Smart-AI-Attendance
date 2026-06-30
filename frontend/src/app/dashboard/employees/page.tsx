@@ -2,11 +2,12 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import {
   Star, AlertTriangle, Plus, Pencil, Trash2, Camera, X, Upload, CheckCircle,
+  RefreshCw, Crosshair,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useRole } from "@/lib/rbac";
 import DashboardShell from "@/components/ui/DashboardShell";
-import type { Employee } from "@/types";
+import type { Employee, Camera as CameraType } from "@/types";
 
 type FormState = {
   full_name: string;
@@ -37,9 +38,23 @@ export default function EmployeesPage() {
 
   // ── Face enrollment modal ─────────────────────────────────────────────────
   const [enrollTarget, setEnrollTarget] = useState<Employee | null>(null);
+  const [enrollTab, setEnrollTab] = useState<"upload" | "camera">("upload");
   const [enrollList, setEnrollList] = useState<EnrollEntry[]>([]);
   const [enrolling, setEnrolling] = useState(false);
   const fileRef = useRef<HTMLInputElement>(null);
+
+  // ── Camera enrollment state ───────────────────────────────────────────────
+  const [cameras, setCameras] = useState<CameraType[]>([]);
+  const [camId, setCamId] = useState<string>("");
+  const [snapshot, setSnapshot] = useState<string | null>(null);  // object URL
+  const [snapLoading, setSnapLoading] = useState(false);
+  const [snapError, setSnapError] = useState("");
+  const [selection, setSelection] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+  const [dragging, setDragging] = useState<{ startX: number; startY: number } | null>(null);
+  const [camEnrolling, setCamEnrolling] = useState(false);
+  const [camEnrollMsg, setCamEnrollMsg] = useState("");
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -109,6 +124,15 @@ export default function EmployeesPage() {
   const openEnroll = (emp: Employee) => {
     setEnrollTarget(emp);
     setEnrollList([]);
+    setEnrollTab("upload");
+    setSnapshot(null);
+    setSelection(null);
+    setSnapError("");
+    setCamEnrollMsg("");
+    api.cameras().then(list => {
+      setCameras(list);
+      if (list.length > 0) setCamId(list[0].id);
+    }).catch(() => {});
   };
 
   const addFiles = (files: FileList | null) => {
@@ -141,6 +165,101 @@ export default function EmployeesPage() {
   const enrollDone = enrollList.length > 0 && enrollList.every(e => e.status !== "pending");
   const okCount = enrollList.filter(e => e.status === "ok").length;
 
+  // ── Camera enrollment helpers ─────────────────────────────────────────────
+  const captureSnapshot = async () => {
+    if (!camId) return;
+    setSnapLoading(true); setSnapError(""); setSnapshot(null); setSelection(null); setCamEnrollMsg("");
+    try {
+      const blob = await api.cameraPreview(camId);
+      if (snapshot) URL.revokeObjectURL(snapshot);
+      setSnapshot(URL.createObjectURL(blob));
+    } catch {
+      setSnapError("Could not fetch snapshot. Make sure the camera is online.");
+    } finally {
+      setSnapLoading(false);
+    }
+  };
+
+  const drawCanvas = useCallback((sel: typeof selection) => {
+    const canvas = canvasRef.current;
+    const img = imgRef.current;
+    if (!canvas || !img) return;
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    if (sel) {
+      ctx.strokeStyle = "#6366f1";
+      ctx.lineWidth = 2;
+      ctx.setLineDash([4, 3]);
+      ctx.strokeRect(sel.x, sel.y, sel.w, sel.h);
+      ctx.fillStyle = "rgba(99,102,241,0.12)";
+      ctx.fillRect(sel.x, sel.y, sel.w, sel.h);
+    }
+  }, []);
+
+  const getCanvasPos = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = canvasRef.current!.getBoundingClientRect();
+    return { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  };
+
+  const onMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const p = getCanvasPos(e);
+    setDragging({ startX: p.x, startY: p.y });
+    setSelection(null);
+    setCamEnrollMsg("");
+  };
+
+  const onMouseMove = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!dragging) return;
+    const p = getCanvasPos(e);
+    const sel = {
+      x: Math.min(dragging.startX, p.x),
+      y: Math.min(dragging.startY, p.y),
+      w: Math.abs(p.x - dragging.startX),
+      h: Math.abs(p.y - dragging.startY),
+    };
+    setSelection(sel);
+    drawCanvas(sel);
+  };
+
+  const onMouseUp = () => setDragging(null);
+
+  const enrollFromCamera = async () => {
+    if (!enrollTarget || !snapshot || !selection || selection.w < 10 || selection.h < 10) return;
+    const canvas = canvasRef.current;
+    const img = imgRef.current;
+    if (!canvas || !img) return;
+
+    // Extract the selected region at original image resolution
+    const scaleX = img.naturalWidth / canvas.width;
+    const scaleY = img.naturalHeight / canvas.height;
+    const off = document.createElement("canvas");
+    off.width  = Math.round(selection.w * scaleX);
+    off.height = Math.round(selection.h * scaleY);
+    off.getContext("2d")!.drawImage(
+      img,
+      selection.x * scaleX, selection.y * scaleY,
+      off.width, off.height,
+      0, 0, off.width, off.height,
+    );
+
+    setCamEnrolling(true); setCamEnrollMsg("");
+    off.toBlob(async (blob) => {
+      if (!blob) { setCamEnrolling(false); return; }
+      const file = new File([blob], "camera_face.jpg", { type: "image/jpeg" });
+      try {
+        await api.enrollFace(enrollTarget.id, file);
+        setCamEnrollMsg("✓ Enrolled from camera successfully! Edge nodes sync within 60s.");
+        reload();
+      } catch (err) {
+        setCamEnrollMsg(`✗ ${err instanceof Error ? err.message : "Enrollment failed"}`);
+      } finally {
+        setCamEnrolling(false);
+      }
+    }, "image/jpeg", 0.95);
+  };
+
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <DashboardShell>
@@ -157,7 +276,7 @@ export default function EmployeesPage() {
         )}
       </div>
 
-      <div className="bg-white dark:bg-gray-800 rounded-xl border dark:border-gray-700 overflow-x-auto">
+      <div className="glass rounded-xl overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="text-xs text-gray-400 dark:text-gray-500 border-b dark:border-gray-700 bg-gray-50/60 dark:bg-gray-700/40">
@@ -321,76 +440,173 @@ export default function EmployeesPage() {
 
       {/* ── Face Enrollment Modal ─────────────────────────────────────────── */}
       {enrollTarget && (
-        <Modal onClose={() => setEnrollTarget(null)} title="Face Enrollment">
-          <p className="text-sm text-gray-500 mb-4">
-            Upload face photos for <strong className="text-gray-800">{enrollTarget.full_name}</strong>.
-            Use 3–5 clear, front-facing photos with good lighting for the best recognition accuracy.
-          </p>
+        <Modal onClose={() => { setEnrollTarget(null); if (snapshot) URL.revokeObjectURL(snapshot); }}
+          title={`Enroll Face — ${enrollTarget.full_name}`} wide>
 
-          {/* drop zone */}
-          <div
-            role="button"
-            tabIndex={0}
-            onClick={() => fileRef.current?.click()}
-            onKeyDown={e => e.key === "Enter" && fileRef.current?.click()}
-            onDragOver={e => e.preventDefault()}
-            onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
-            className="border-2 border-dashed border-gray-200 rounded-xl p-8 text-center cursor-pointer
-                       hover:border-indigo-400 hover:bg-indigo-50/20 transition-colors select-none">
-            <Upload className="mx-auto text-gray-300 mb-2" size={30} />
-            <p className="text-sm text-gray-500 font-medium">Click or drag photos here</p>
-            <p className="text-xs text-gray-400 mt-1">JPG · PNG · WEBP — up to 10 images</p>
-          </div>
-          <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
-            onChange={e => addFiles(e.target.files)} />
-
-          {/* file list */}
-          {enrollList.length > 0 && (
-            <ul className="mt-3 space-y-1.5 max-h-52 overflow-y-auto pr-1">
-              {enrollList.map((entry, i) => (
-                <li key={i} className="flex items-center gap-2 text-sm bg-gray-50 rounded-lg px-3 py-2">
-                  <span className="flex-1 truncate text-gray-700 text-xs">{entry.file.name}</span>
-                  {entry.status === "pending" && !enrolling && (
-                    <button onClick={() => removeFile(i)} className="text-gray-400 hover:text-red-500 flex-shrink-0">
-                      <X size={13} />
-                    </button>
-                  )}
-                  {entry.status === "pending" && enrolling && (
-                    <span className="text-gray-400 text-xs flex-shrink-0">Processing…</span>
-                  )}
-                  {entry.status === "ok" && (
-                    <span className="text-green-600 text-xs font-medium flex-shrink-0">✓ OK</span>
-                  )}
-                  {entry.status === "error" && (
-                    <span className="text-red-500 text-xs flex-shrink-0" title={entry.msg}>✗ Failed</span>
-                  )}
-                </li>
-              ))}
-            </ul>
-          )}
-
-          {/* result summary */}
-          {enrollDone && (
-            <p className={`mt-3 text-sm font-medium ${okCount === enrollList.length ? "text-green-600" : "text-amber-600"}`}>
-              {okCount}/{enrollList.length} photos enrolled successfully.
-              {okCount > 0 && " The model will now recognise this employee."}
-            </p>
-          )}
-
-          <div className="flex justify-end gap-2 mt-5">
-            <button onClick={() => setEnrollTarget(null)}
-              className="px-4 py-2 text-sm border rounded-lg hover:bg-gray-50 transition-colors">
-              {enrollDone ? "Close" : "Cancel"}
-            </button>
-            {!enrollDone && enrollList.length > 0 && (
-              <button onClick={runEnrollment} disabled={enrolling}
-                className="px-5 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium">
-                {enrolling
-                  ? "Enrolling…"
-                  : `Enroll ${enrollList.length} Photo${enrollList.length > 1 ? "s" : ""}`}
+          {/* Tabs */}
+          <div className="flex gap-1 bg-gray-100 dark:bg-gray-700 rounded-lg p-1 mb-5">
+            {(["upload", "camera"] as const).map(tab => (
+              <button key={tab} onClick={() => setEnrollTab(tab)}
+                className={`flex-1 text-xs py-1.5 rounded-md font-medium transition-colors ${
+                  enrollTab === tab
+                    ? "bg-white dark:bg-gray-600 text-gray-900 dark:text-white shadow-sm"
+                    : "text-gray-500 dark:text-gray-400 hover:text-gray-700 dark:hover:text-gray-200"
+                }`}>
+                {tab === "upload" ? "📁 Upload Photos" : "📷 From Camera (CCTV)"}
               </button>
-            )}
+            ))}
           </div>
+
+          {/* ── Upload tab ── */}
+          {enrollTab === "upload" && (
+            <>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                Best for frontal cameras — upload 3–5 clear face photos taken under the same lighting as your entrance camera.
+              </p>
+              <div
+                role="button" tabIndex={0}
+                onClick={() => fileRef.current?.click()}
+                onKeyDown={e => e.key === "Enter" && fileRef.current?.click()}
+                onDragOver={e => e.preventDefault()}
+                onDrop={e => { e.preventDefault(); addFiles(e.dataTransfer.files); }}
+                className="border-2 border-dashed border-gray-200 dark:border-gray-600 rounded-xl p-8 text-center cursor-pointer hover:border-indigo-400 hover:bg-indigo-50/20 dark:hover:bg-indigo-900/10 transition-colors select-none">
+                <Upload className="mx-auto text-gray-300 mb-2" size={28} />
+                <p className="text-sm text-gray-500 font-medium">Click or drag photos here</p>
+                <p className="text-xs text-gray-400 mt-1">JPG · PNG · WEBP — up to 10 images</p>
+              </div>
+              <input ref={fileRef} type="file" accept="image/*" multiple className="hidden"
+                onChange={e => addFiles(e.target.files)} />
+
+              {enrollList.length > 0 && (
+                <ul className="mt-3 space-y-1.5 max-h-44 overflow-y-auto pr-1">
+                  {enrollList.map((entry, i) => (
+                    <li key={i} className="flex items-center gap-2 bg-gray-50 dark:bg-gray-700/50 rounded-lg px-3 py-2">
+                      <span className="flex-1 truncate text-gray-700 dark:text-gray-300 text-xs">{entry.file.name}</span>
+                      {entry.status === "pending" && !enrolling && (
+                        <button onClick={() => removeFile(i)} className="text-gray-400 hover:text-red-500"><X size={13} /></button>
+                      )}
+                      {entry.status === "pending" && enrolling && <span className="text-gray-400 text-xs">Processing…</span>}
+                      {entry.status === "ok"    && <span className="text-green-600 text-xs font-medium">✓ OK</span>}
+                      {entry.status === "error" && <span className="text-red-500 text-xs" title={entry.msg}>✗ Failed</span>}
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {enrollDone && (
+                <p className={`mt-3 text-sm font-medium ${okCount === enrollList.length ? "text-green-600" : "text-amber-600"}`}>
+                  {okCount}/{enrollList.length} enrolled. {okCount > 0 && "Edge nodes sync within 60s."}
+                </p>
+              )}
+              <div className="flex justify-end gap-2 mt-5">
+                <button onClick={() => setEnrollTarget(null)}
+                  className="px-4 py-2 text-sm border dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 dark:text-gray-300 transition-colors">
+                  {enrollDone ? "Close" : "Cancel"}
+                </button>
+                {!enrollDone && enrollList.length > 0 && (
+                  <button onClick={runEnrollment} disabled={enrolling}
+                    className="px-5 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium">
+                    {enrolling ? "Enrolling…" : `Enroll ${enrollList.length} Photo${enrollList.length > 1 ? "s" : ""}`}
+                  </button>
+                )}
+              </div>
+            </>
+          )}
+
+          {/* ── Camera tab ── */}
+          {enrollTab === "camera" && (
+            <>
+              <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+                Best for CCTV/overhead cameras — capture a live frame, drag to select the face, then enroll.
+                The embedding will match the camera&apos;s actual viewing angle.
+              </p>
+
+              {/* Camera selector + capture */}
+              <div className="flex gap-2 mb-3">
+                <select
+                  value={camId}
+                  onChange={e => { setCamId(e.target.value); setSnapshot(null); setSelection(null); setCamEnrollMsg(""); }}
+                  className="flex-1 border dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                  {cameras.length === 0
+                    ? <option>No cameras registered</option>
+                    : cameras.map(c => <option key={c.id} value={c.id}>{c.name} — {c.location || c.direction}</option>)
+                  }
+                </select>
+                <button
+                  onClick={captureSnapshot}
+                  disabled={!camId || snapLoading}
+                  className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-800 dark:bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors font-medium whitespace-nowrap">
+                  <RefreshCw size={13} className={snapLoading ? "animate-spin" : ""} />
+                  {snapLoading ? "Loading…" : snapshot ? "Refresh" : "Capture"}
+                </button>
+              </div>
+
+              {snapError && (
+                <p className="text-xs text-red-600 dark:text-red-400 mb-2">{snapError}</p>
+              )}
+
+              {/* Snapshot canvas */}
+              {snapshot ? (
+                <div className="relative">
+                  <img
+                    ref={imgRef}
+                    src={snapshot}
+                    alt="Camera snapshot"
+                    className="hidden"
+                    onLoad={() => {
+                      const canvas = canvasRef.current;
+                      const img = imgRef.current;
+                      if (!canvas || !img) return;
+                      canvas.width  = canvas.offsetWidth;
+                      canvas.height = Math.round(canvas.offsetWidth * img.naturalHeight / img.naturalWidth);
+                      drawCanvas(selection);
+                    }}
+                  />
+                  <canvas
+                    ref={canvasRef}
+                    className="w-full rounded-lg border dark:border-gray-600 cursor-crosshair"
+                    style={{ touchAction: "none" }}
+                    onMouseDown={onMouseDown}
+                    onMouseMove={onMouseMove}
+                    onMouseUp={onMouseUp}
+                    onMouseLeave={onMouseUp}
+                  />
+                  <div className="absolute top-2 left-2 bg-black/60 text-white text-xs px-2 py-1 rounded flex items-center gap-1">
+                    <Crosshair size={11} /> Drag to select face
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-col items-center justify-center h-48 border-2 border-dashed border-gray-200 dark:border-gray-600 rounded-xl text-gray-400 dark:text-gray-500">
+                  <Camera size={28} className="mb-2 opacity-40" />
+                  <p className="text-sm">Select a camera and click Capture</p>
+                </div>
+              )}
+
+              {camEnrollMsg && (
+                <p className={`mt-3 text-sm font-medium ${camEnrollMsg.startsWith("✓") ? "text-green-600" : "text-red-600"}`}>
+                  {camEnrollMsg}
+                </p>
+              )}
+
+              {selection && !camEnrollMsg && (
+                <p className="mt-2 text-xs text-indigo-600 dark:text-indigo-400">
+                  Face region selected ({Math.round(selection.w)}×{Math.round(selection.h)}px) — ready to enroll.
+                </p>
+              )}
+
+              <div className="flex justify-end gap-2 mt-4">
+                <button onClick={() => setEnrollTarget(null)}
+                  className="px-4 py-2 text-sm border dark:border-gray-600 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 dark:text-gray-300 transition-colors">
+                  Close
+                </button>
+                <button
+                  onClick={enrollFromCamera}
+                  disabled={!snapshot || !selection || selection.w < 10 || camEnrolling}
+                  className="px-5 py-2 text-sm bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors font-medium">
+                  {camEnrolling ? "Enrolling…" : "Enroll Face"}
+                </button>
+              </div>
+            </>
+          )}
         </Modal>
       )}
     </DashboardShell>
@@ -444,11 +660,13 @@ function Field({ label, span, hint, children }: { label: string; span?: 1 | 2; h
   );
 }
 
-function Modal({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) {
+function Modal({ title, onClose, children, wide }: {
+  title: string; onClose: () => void; children: React.ReactNode; wide?: boolean;
+}) {
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl w-full max-w-lg">
-        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b dark:border-gray-700">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
+      <div className={`glass-heavy rounded-2xl w-full ${wide ? "max-w-2xl" : "max-w-lg"} max-h-[90vh] overflow-y-auto`}>
+        <div className="flex items-center justify-between px-6 pt-5 pb-4 border-b border-white/30 dark:border-white/[0.07] sticky top-0 glass-heavy z-10">
           <h3 className="text-base font-semibold text-gray-900 dark:text-white">{title}</h3>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-700 transition-colors">
             <X size={18} />
