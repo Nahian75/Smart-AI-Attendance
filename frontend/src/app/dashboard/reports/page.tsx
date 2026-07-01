@@ -14,7 +14,7 @@ export default function ReportsPage() {
       <h2 className="text-lg font-medium mb-4">Reports</h2>
       <div className="glass rounded-xl p-4 mb-4">
         <p className="text-sm font-medium mb-3 text-gray-900 dark:text-white">Monthly attendance CSV export</p>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
           <select value={year} onChange={(e) => setYear(+e.target.value)}
                   className="border dark:border-gray-600 rounded-lg px-3 py-1.5 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
             {Array.from({ length: 5 }, (_, i) => now.getFullYear() - 2 + i).map((y) => <option key={y}>{y}</option>)}

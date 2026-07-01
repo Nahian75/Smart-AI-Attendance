@@ -263,7 +263,7 @@ export default function EmployeesPage() {
   // ── Render ────────────────────────────────────────────────────────────────
   return (
     <DashboardShell>
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-6">
         <div>
           <h2 className="text-lg font-semibold text-gray-900">Employees</h2>
           <p className="text-xs text-gray-400 mt-0.5">{employees.length} total</p>
@@ -277,7 +277,7 @@ export default function EmployeesPage() {
       </div>
 
       <div className="glass rounded-xl overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm min-w-[860px]">
           <thead>
             <tr className="text-xs text-gray-400 dark:text-gray-500 border-b dark:border-gray-700 bg-gray-50/60 dark:bg-gray-700/40">
               <th className="text-left px-4 py-3 font-medium">Name</th>
@@ -386,7 +386,7 @@ export default function EmployeesPage() {
             {BD_DESIGNATIONS.map(d => <option key={d} value={d} />)}
           </datalist>
 
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             <Field label="Full Name *" span={2} hint="e.g. Md. Karim Hossain, Fatima Begum">
               <input className={INPUT}
                 value={form.full_name}
@@ -521,11 +521,11 @@ export default function EmployeesPage() {
               </p>
 
               {/* Camera selector + capture */}
-              <div className="flex gap-2 mb-3">
+              <div className="flex flex-col sm:flex-row gap-2 mb-3">
                 <select
                   value={camId}
                   onChange={e => { setCamId(e.target.value); setSnapshot(null); setSelection(null); setCamEnrollMsg(""); }}
-                  className="flex-1 border dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white">
+                  className="flex-1 border dark:border-gray-600 rounded-lg px-3 py-2 text-sm bg-white dark:bg-gray-700 text-gray-900 dark:text-white min-w-0">
                   {cameras.length === 0
                     ? <option>No cameras registered</option>
                     : cameras.map(c => <option key={c.id} value={c.id}>{c.name} — {c.location || c.direction}</option>)
@@ -534,7 +534,7 @@ export default function EmployeesPage() {
                 <button
                   onClick={captureSnapshot}
                   disabled={!camId || snapLoading}
-                  className="flex items-center gap-1.5 px-3 py-2 text-sm bg-gray-800 dark:bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors font-medium whitespace-nowrap">
+                  className="flex items-center justify-center gap-1.5 px-3 py-2 text-sm bg-gray-800 dark:bg-gray-600 text-white rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors font-medium whitespace-nowrap">
                   <RefreshCw size={13} className={snapLoading ? "animate-spin" : ""} />
                   {snapLoading ? "Loading…" : snapshot ? "Refresh" : "Capture"}
                 </button>

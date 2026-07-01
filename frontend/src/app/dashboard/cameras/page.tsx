@@ -143,7 +143,7 @@ export default function CamerasPage() {
 
   return (
     <DashboardShell>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <h2 className="text-lg font-medium">
           Cameras
           <span className="ml-2 text-xs font-normal text-gray-400">
@@ -152,7 +152,7 @@ export default function CamerasPage() {
               ` · ${cameras.filter(c => !c.is_active).length} disabled`}
           </span>
         </h2>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {can("admin") && (
             <label className="flex items-center gap-1.5 text-xs text-gray-500 cursor-pointer select-none">
               <input
@@ -208,7 +208,7 @@ export default function CamerasPage() {
       {showForm && (
         <div className="glass rounded-xl p-4 mb-4 space-y-3">
           <p className="text-sm font-medium">{editingId ? "Edit camera" : "New camera"}</p>
-          <div className="grid grid-cols-2 gap-3">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
             {(["name", "location", "rtsp_url", "camera_zone"] as const).map((k) => (
               <div key={k}>
                 <label className="text-xs text-gray-500 capitalize">{k.replace(/_/g, " ")}</label>
@@ -264,7 +264,7 @@ export default function CamerasPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
         {cameras.map((cam) => (
           <div key={cam.id} className={`glass rounded-xl p-4 transition-opacity ${!cam.is_active ? "opacity-50" : ""}`}>
             {cam.is_active

@@ -3,7 +3,7 @@ import { useState } from "react";
 import { useRouter, usePathname } from "next/navigation";
 import {
   ScanEye, BarChart3, Users, Video, ShieldAlert, LogOut,
-  TrendingUp, FileText, KeyRound, X, Eye, EyeOff, Settings, Clock, Film,
+  TrendingUp, FileText, KeyRound, X, Eye, EyeOff, Settings, Clock, Film, Menu,
 } from "lucide-react";
 import { clearSession } from "@/lib/auth";
 import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/rbac";
@@ -132,6 +132,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
   const router   = useRouter();
   const pathname = usePathname();
   const [showPwModal, setShowPwModal] = useState(false);
+  const [navOpen, setNavOpen] = useState(false);
   const { role, can } = useRole();
 
   const roleLabel = ROLE_LABELS[role] ?? role;
@@ -142,15 +143,50 @@ export default function DashboardShell({ children }: { children: React.ReactNode
     return pathname.startsWith(href);
   }
 
+  function go(href: string) {
+    router.push(href);
+    setNavOpen(false);
+  }
+
   return (
     <div className="flex min-h-screen">
-      {/* ── Sidebar ── */}
-      <aside className="w-52 glass-sidebar p-3 flex flex-col gap-0.5 flex-shrink-0">
-        <div className="flex items-center gap-2 px-2 py-3 mb-1 font-semibold text-gray-900 dark:text-white">
-          <ScanEye className="text-blue-600" size={20} />
+      {/* ── Mobile top bar ── */}
+      <div className="md:hidden fixed top-0 inset-x-0 z-30 flex items-center justify-between px-3 h-14 glass-sidebar">
+        <button onClick={() => setNavOpen(true)} aria-label="Open menu"
+          className="p-2 -ml-2 text-gray-600 dark:text-gray-300">
+          <Menu size={22} />
+        </button>
+        <div className="flex items-center gap-1.5 font-semibold text-gray-900 dark:text-white">
+          <ScanEye className="text-blue-600" size={18} />
           <span className="font-bold tracking-tight">
             Ocu<span className="text-blue-600">lus</span>
           </span>
+        </div>
+        <ThemeToggle />
+      </div>
+
+      {/* ── Mobile drawer backdrop ── */}
+      {navOpen && (
+        <div className="md:hidden fixed inset-0 z-40 bg-black/40 backdrop-blur-sm"
+          onClick={() => setNavOpen(false)} />
+      )}
+
+      {/* ── Sidebar (fixed drawer on mobile, static column on md+) ── */}
+      <aside className={`w-64 md:w-52 glass-sidebar p-3 flex flex-col gap-0.5 flex-shrink-0
+                          fixed md:static inset-y-0 left-0 z-50 md:z-auto
+                          transition-transform duration-200 ease-out
+                          ${navOpen ? "translate-x-0" : "-translate-x-full"} md:translate-x-0`}>
+        <div className="flex items-center justify-between px-2 py-3 mb-1">
+          <div className="flex items-center gap-2 font-semibold text-gray-900 dark:text-white">
+            <ScanEye className="text-blue-600" size={20} />
+            <span className="font-bold tracking-tight">
+              Ocu<span className="text-blue-600">lus</span>
+            </span>
+          </div>
+          <button onClick={() => setNavOpen(false)} aria-label="Close menu"
+            className="md:hidden p-1 text-gray-400 hover:text-gray-700 dark:hover:text-gray-200">
+            <X size={18} />
+          </button>
         </div>
 
         {/* Role badge */}
@@ -161,30 +197,32 @@ export default function DashboardShell({ children }: { children: React.ReactNode
         </div>
 
         {/* Nav links */}
-        {NAV.map((n) => (
-          <button key={n.label} onClick={() => router.push(n.href)}
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-all ${
-              isActive(n.href)
-                ? "glass-active text-blue-700 dark:text-blue-300 font-medium"
-                : "text-gray-500 dark:text-gray-400 hover:bg-white/40 dark:hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-white"
-            }`}>
-            <n.icon size={15} />
-            {n.label}
-          </button>
-        ))}
+        <div className="overflow-y-auto flex-1 flex flex-col gap-0.5">
+          {NAV.map((n) => (
+            <button key={n.label} onClick={() => go(n.href)}
+              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-all ${
+                isActive(n.href)
+                  ? "glass-active text-blue-700 dark:text-blue-300 font-medium"
+                  : "text-gray-500 dark:text-gray-400 hover:bg-white/40 dark:hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-white"
+              }`}>
+              <n.icon size={15} />
+              {n.label}
+            </button>
+          ))}
 
-        {/* Admin link — only visible to admin+ */}
-        {can("admin") && (
-          <button onClick={() => router.push("/dashboard/admin")}
-            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-all ${
-              isActive("/dashboard/admin")
-                ? "glass-active text-blue-700 dark:text-blue-300 font-medium"
-                : "text-gray-500 dark:text-gray-400 hover:bg-white/40 dark:hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-white"
-            }`}>
-            <Settings size={15} />
-            Admin
-          </button>
-        )}
+          {/* Admin link — only visible to admin+ */}
+          {can("admin") && (
+            <button onClick={() => go("/dashboard/admin")}
+              className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm w-full text-left transition-all ${
+                isActive("/dashboard/admin")
+                  ? "glass-active text-blue-700 dark:text-blue-300 font-medium"
+                  : "text-gray-500 dark:text-gray-400 hover:bg-white/40 dark:hover:bg-white/[0.05] hover:text-gray-900 dark:hover:text-white"
+              }`}>
+              <Settings size={15} />
+              Admin
+            </button>
+          )}
+        </div>
 
         {/* Footer */}
         <div className="mt-auto pt-2 border-t border-white/40 dark:border-white/[0.06] space-y-0.5">
@@ -194,7 +232,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
             <KeyRound size={15} /> Change Password
           </button>
 
-          <div className="px-3 py-1.5 flex items-center justify-between">
+          <div className="hidden md:flex px-3 py-1.5 items-center justify-between">
             <span className="text-xs text-gray-400 dark:text-gray-500">Theme</span>
             <ThemeToggle />
           </div>
@@ -208,7 +246,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       </aside>
 
       {/* ── Main content ── */}
-      <main className="flex-1 p-6 overflow-y-auto space-y-4">
+      <main className="flex-1 p-3 pt-[4.5rem] md:p-6 md:pt-6 overflow-y-auto overflow-x-hidden space-y-4 min-w-0">
         {children}
       </main>
 

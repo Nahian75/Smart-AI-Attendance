@@ -149,7 +149,7 @@ export default function AdminPage() {
 
   return (
     <DashboardShell>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
             <ShieldCheck size={18} className="text-blue-600" /> User Management
@@ -167,7 +167,7 @@ export default function AdminPage() {
       {err && <div className="mb-3 rounded-lg bg-red-50 dark:bg-red-900/20 px-3 py-2 text-sm text-red-700 dark:text-red-400">{err}</div>}
 
       <div className="glass rounded-xl overflow-x-auto">
-        <table className="w-full text-sm">
+        <table className="w-full text-sm min-w-[680px]">
           <thead>
             <tr className="text-xs text-gray-400 border-b dark:border-gray-700 bg-gray-50/60 dark:bg-gray-700/40">
               <th className="text-left px-4 py-3 font-medium">Name</th>

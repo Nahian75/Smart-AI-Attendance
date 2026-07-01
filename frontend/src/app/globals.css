@@ -3,6 +3,13 @@
 @tailwind utilities;
 
 /* ── Gradient background ─────────────────────────────────────────────────── */
+html, body {
+  /* Safety net: prevents any stray fixed-width element from causing the
+     whole page to scroll sideways on narrow/mobile viewports. */
+  overflow-x: hidden;
+  max-width: 100vw;
+}
+
 body {
   font-family: system-ui, -apple-system, sans-serif;
   color: #111827;

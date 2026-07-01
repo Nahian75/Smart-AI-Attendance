@@ -198,7 +198,7 @@ export default function Dashboard() {
       <h1 className="text-lg font-medium">Overview</h1>
 
       {/* Stat cards */}
-      <div className="grid grid-cols-5 gap-3">
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
         {stats.map((s) => (
           <div key={s.label} className="glass rounded-xl p-3">
             <div className="flex items-center gap-1.5 text-xs text-gray-500 dark:text-gray-400 mb-1.5">
@@ -210,7 +210,7 @@ export default function Dashboard() {
       </div>
 
       {/* Occupancy + weekly */}
-      <div className="grid grid-cols-[240px_1fr] gap-4">
+      <div className="grid grid-cols-1 lg:grid-cols-[240px_1fr] gap-4">
         <OccupancyCards />
         <WeeklyChart />
       </div>
@@ -248,9 +248,7 @@ export default function Dashboard() {
         ) : (
           <div className={`p-3 grid gap-3 ${
             cameras.length === 1 ? "grid-cols-1 max-w-sm" :
-            cameras.length === 2 ? "grid-cols-2" :
-            cameras.length <= 4 ? "grid-cols-2 lg:grid-cols-4" :
-            "grid-cols-2 lg:grid-cols-4"
+            "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
           }`}>
             {cameras.map(cam => (
               <CameraFeed
@@ -267,7 +265,7 @@ export default function Dashboard() {
       </div>
 
       {/* 3-col live area */}
-      <div className="grid grid-cols-[1fr_280px_280px] gap-4">
+      <div className="grid grid-cols-1 xl:grid-cols-[1fr_280px_280px] gap-4">
         {/* Recent check-ins table */}
         <div className="glass rounded-xl">
           <div className="px-4 py-3 border-b dark:border-gray-700 text-sm font-medium text-gray-900 dark:text-white flex items-center justify-between">
@@ -279,7 +277,8 @@ export default function Dashboard() {
               </button>
             )}
           </div>
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[520px]">
             <thead>
               <tr className="text-xs text-gray-400 dark:text-gray-500 border-b dark:border-gray-700">
                 <th className="text-left px-4 py-2">Employee</th>
@@ -332,6 +331,7 @@ export default function Dashboard() {
               )}
             </tbody>
           </table>
+          </div>
           {(logPage > 1 || logHasMore) && (
             <div className="flex items-center justify-between px-4 py-2 border-t dark:border-gray-700">
               <button

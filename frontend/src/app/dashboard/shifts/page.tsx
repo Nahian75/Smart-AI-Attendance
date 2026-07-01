@@ -278,7 +278,7 @@ export default function ShiftsPage() {
   return (
     <DashboardShell>
       {/* ── Header ── */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
           <h2 className="text-lg font-semibold text-gray-900 dark:text-white flex items-center gap-2">
             <Clock size={18} className="text-blue-600" /> Shift Management
@@ -288,7 +288,7 @@ export default function ShiftsPage() {
           </p>
         </div>
         {can("hr") && (
-          <div className="flex gap-2">
+          <div className="flex flex-wrap gap-2">
             <button onClick={() => setShowAssign(true)}
               className="flex items-center gap-1.5 border dark:border-gray-600 text-gray-700 dark:text-gray-300 text-sm px-3 py-2 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-700 transition-colors">
               <UserCheck size={14} /> Assign Employee
@@ -306,7 +306,7 @@ export default function ShiftsPage() {
       {/* ── How it works banner ── */}
       <div className="bg-blue-50 dark:bg-blue-900/20 rounded-xl border border-blue-100 dark:border-blue-800 px-4 py-3 text-sm text-blue-700 dark:text-blue-300 space-y-1">
         <p className="font-medium">How shift times control attendance detection:</p>
-        <div className="grid grid-cols-3 gap-2 text-xs mt-1">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs mt-1">
           <div className="bg-white dark:bg-gray-800 rounded-lg p-2">
             <p className="font-medium text-amber-600 dark:text-amber-400">Late Arrival</p>
             <p>Check-in after <strong>Start + Grace period</strong></p>
@@ -390,7 +390,8 @@ export default function ShiftsPage() {
             {can("hr") && <> Click <strong>Assign Employee</strong> above.</>}
           </div>
         ) : (
-          <table className="w-full text-sm">
+          <div className="overflow-x-auto">
+          <table className="w-full text-sm min-w-[560px]">
             <thead>
               <tr className="text-xs text-gray-400 dark:text-gray-500 border-b dark:border-gray-700 bg-gray-50/60 dark:bg-gray-700/40">
                 <th className="text-left px-4 py-2 font-medium">Employee</th>
@@ -431,6 +432,7 @@ export default function ShiftsPage() {
               ))}
             </tbody>
           </table>
+          </div>
         )}
       </div>
 

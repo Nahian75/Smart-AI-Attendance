@@ -51,7 +51,7 @@ function AlertCard({ a, onAck, canAck }: { a: AlertItem; onAck: (id: string) => 
   const { Icon } = meta;
 
   return (
-    <div className={`flex gap-4 rounded-xl border p-4 shadow-sm transition-opacity ${sev.card} ${a.is_acknowledged ? "opacity-60" : ""}`}>
+    <div className={`flex flex-wrap sm:flex-nowrap gap-3 sm:gap-4 rounded-xl border p-4 shadow-sm transition-opacity ${sev.card} ${a.is_acknowledged ? "opacity-60" : ""}`}>
       {/* Icon badge */}
       <div className={`flex-shrink-0 w-10 h-10 rounded-full flex items-center justify-center ${sev.iconBg}`}>
         <Icon size={18} />
@@ -121,7 +121,7 @@ export default function AlertsPage() {
   return (
     <DashboardShell>
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <div className="w-9 h-9 rounded-xl bg-red-100 dark:bg-red-900/40 flex items-center justify-center">
             <ShieldAlert size={18} className="text-red-600 dark:text-red-400" />

@@ -229,7 +229,7 @@ export default function DetectionLogPage() {
     <DashboardShell>
       {lightbox && <Lightbox url={lightbox} onClose={() => setLightbox(null)} />}
 
-      <div className="flex items-center justify-between">
+      <div className="flex flex-wrap items-center justify-between gap-2">
         <h1 className="text-lg font-medium text-gray-900 dark:text-white">Detection Evidence Log</h1>
         <button
           onClick={() => { fetchStats().then(setStats).catch(() => {}); load(page); }}
@@ -241,7 +241,7 @@ export default function DetectionLogPage() {
 
       {/* Stats bar */}
       {stats && (
-        <div className="grid grid-cols-4 gap-3">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
           {[
             { label: "Total Detections", value: stats.total_detections, color: "text-gray-800 dark:text-gray-100" },
             { label: "Recognised",       value: stats.recognised,       color: "text-green-600 dark:text-green-400" },
@@ -274,7 +274,7 @@ export default function DetectionLogPage() {
           ))}
         </div>
 
-        <div className="flex items-center gap-2 ml-auto">
+        <div className="flex flex-wrap items-center gap-2 sm:ml-auto">
           <label className="text-xs text-gray-500">From</label>
           <input
             type="date"
