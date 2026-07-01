@@ -209,6 +209,11 @@ class AttendanceService:
                 await self.alerts.clear_loitering(tenant_id, emp_id, camera_id)
 
         elif action == "skip_duplicate":
+            # Commit even on this early-return path — check_loitering() above may
+            # have flushed a new Alert row that would otherwise be silently rolled
+            # back (the Redis pub/sub toast fires regardless, but the DB row needs
+            # an explicit commit like every other path in this method).
+            await self.db.commit()
             return {"action": "skip", "reason": "already_checked_in"}
 
         await self.db.commit()
