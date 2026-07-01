@@ -1,51 +1,52 @@
 # ================================================================
 #  MediaMTX config — runs LOCALLY on the edge machine (start_edge.bat).
-#  Pulls each camera's RTSP stream and pushes it out as SRT to the
-#  cloud VM's MediaMTX ingest (infra/mediamtx/mediamtx.cloud.yml),
-#  so the dashboard can view live video without opening any inbound
-#  port on your home network (the edge always initiates the connection).
+#  Pushes each camera's ANNOTATED feed (with bounding box overlays —
+#  edge_node's own detection output, not the raw camera RTSP) out as
+#  SRT to the cloud VM's MediaMTX ingest
+#  (infra/mediamtx/mediamtx.cloud.yml), so the dashboard can view live
+#  video without opening any inbound port on your home network (the
+#  edge always initiates the connection).
 #
-#  Add one entry under `paths:` per camera. `%CLOUD_HOST%` and
-#  `%MTX_SRTPUBLISHPASS%` are substituted from .env.edge by
-#  start_edge.bat before this file is mounted into the mediamtx container.
+#  The RTSP camera URL itself is NOT configured here — edge_node
+#  already pulls each camera's real RTSP URL dynamically from the
+#  backend's registered camera list and serves the annotated result
+#  at http://edge_node:8001/stream/<camera_id> (same Docker network,
+#  see docker-compose.edge.yml). This file only needs to know each
+#  camera's id (the UUID shown in the dashboard's Cameras page) to
+#  push it out — add/remove entries in the CAMERA_IDS list below.
 #
-#  Copy this file to edge/mediamtx.edge.yml (gitignored — contains real
-#  camera credentials) and fill in your actual RTSP URLs. start_edge.bat
-#  will offer to create it from this template automatically if missing.
+#  `%CLOUD_HOST%` and `%MTX_SRTPUBLISHPASS%` are substituted from
+#  .env.edge by start_edge.bat before this file is mounted into the
+#  mediamtx container.
 # ================================================================
 
 logLevel: info
 
-# No local playback servers needed — this instance only relays outbound.
-rtsp: yes
-rtspAddress: :8554
+# No local RTSP relay needed — runOnInit pushes directly from
+# edge_node's annotated MJPEG output for each camera below.
+rtsp: no
 hls: no
 webrtc: no
 srt: no
 
+# ── Camera IDs to push ─────────────────────────────────────────
+# runOnInit/runOnInitRestart are path-level hooks, not global — this
+# path has no source/stream of its own, it only exists to host the
+# init hook. One `while ... done &` loop per camera inside it. Get
+# each camera's id from the dashboard's Cameras page (edit view URL /
+# API response). Duplicate the loop block per camera, changing only
+# CAMERA_ID_n — note the "|" block (not ">") to keep real line breaks,
+# since this is an actual shell script, not a single folded line.
 paths:
-  # ── Example: replace with your actual camera RTSP URLs ──────────
-  # Duplicate this block per camera. The path name (cam1 below) MUST
-  # match that camera's id in the backend (Cameras page in the
-  # dashboard — the UUID shown in the camera's edit view), because the
-  # dashboard builds the HLS playback URL as
-  # <NEXT_PUBLIC_HLS_URL>/<camera_id>/index.m3u8. If you rename cam1,
-  # update it in all THREE places below: the path key, the local rtsp://
-  # source URL, and streamid=publish:<name> in the SRT push URL.
-  cam1:
-    source: rtsp://USER:PASS@CAMERA_IP:554/Streaming/Channels/101
-    sourceOnDemand: no
-    runOnReady: >
-      ffmpeg -rtsp_transport tcp -i rtsp://localhost:8554/cam1
-      -c copy -f mpegts
-      "srt://%CLOUD_HOST%:8890?streamid=publish:cam1&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316"
-    runOnReadyRestart: yes
-
-  # cam2:
-  #   source: rtsp://USER:PASS@CAMERA_IP2:554/Streaming/Channels/101
-  #   sourceOnDemand: no
-  #   runOnReady: >
-  #     ffmpeg -rtsp_transport tcp -i rtsp://localhost:8554/cam2
-  #     -c copy -f mpegts
-  #     "srt://%CLOUD_HOST%:8890?streamid=publish:cam2&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316"
-  #   runOnReadyRestart: yes
+  _srt_push:
+    runOnInit: |
+      sh -c '
+      while true; do
+        ffmpeg -f mjpeg -i http://edge_node:8001/stream/CAMERA_ID_1 \
+          -c:v libx264 -preset ultrafast -tune zerolatency -f mpegts \
+          "srt://%CLOUD_HOST%:8890?streamid=publish:CAMERA_ID_1&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316"
+        sleep 2
+      done &
+      wait
+      '
+    runOnInitRestart: yes

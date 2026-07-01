@@ -30,14 +30,16 @@ services:
       - edge_models:/root/.insightface
       - edge_yolo:/root/.config/Ultralytics
 
-  # ── MediaMTX: pulls camera RTSP locally, pushes SRT out to the cloud VM ──
+  # ── MediaMTX: pulls each camera's ANNOTATED feed from edge_node's MJPEG
+  # output (bounding boxes included) and pushes it out as SRT to the cloud.
   # start_edge.bat generates mediamtx.edge.generated.yml from
   # edge/mediamtx.edge.yml with CLOUD_HOST/MTX_SRTPUBLISHPASS substituted.
   mediamtx:
-    # runOnReady hooks shell out to ffmpeg to push SRT to the cloud VM —
-    # the plain "latest" image doesn't bundle it, only this variant does.
+    # runOnInit shells out to ffmpeg to pull MJPEG from edge_node and push
+    # SRT to the cloud VM — the plain "latest" image doesn't bundle ffmpeg.
     image: bluenviron/mediamtx:latest-ffmpeg
     restart: unless-stopped
+    depends_on: [edge_node]
     volumes:
       - ./edge/mediamtx.edge.generated.yml:/mediamtx.yml:ro
 
