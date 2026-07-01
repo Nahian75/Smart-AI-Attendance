@@ -1,0 +1,37 @@
+============================================================
+  MODEL DOWNLOAD INSTRUCTIONS
+============================================================
+
+--- Anti-Spoof Model (REQUIRED for liveness detection) ---
+
+File:    antispoof_128.onnx
+Place:   edge/weights/antispoof_128.onnx
+
+Source:  https://github.com/hairymax/Face-AntiSpoofing/releases
+         → Download "antispoof_128.onnx" from the latest release
+
+Why:
+  Without this file the system falls back to a texture heuristic
+  which is weak against phone-screen replay attacks on compressed
+  streams (V380, budget WiFi cameras). The ONNX model (MiniFASNet,
+  trained on CelebA-Spoof) catches screen replays and printed
+  photos with AUC ~0.99.
+
+Quick test after placing the file:
+  python -c "import onnxruntime as ort; s = ort.InferenceSession('edge/weights/antispoof_128.onnx'); print('OK:', s.get_inputs()[0].shape)"
+  Expected output: OK: [1, 3, 128, 128]
+
+
+--- YOLO Model (auto-downloaded on first run) ---
+
+File:    yolo11s.pt
+Source:  Downloaded automatically by ultralytics on first start
+         (requires internet connection, ~22 MB)
+
+
+--- ArcFace / InsightFace Models (auto-downloaded on first run) ---
+
+Pack:    buffalo_l  (SCRFD face detector + ArcFace R100)
+Source:  Downloaded automatically by insightface on first start
+         (~500 MB, stored in ~/.insightface/models/)
+============================================================

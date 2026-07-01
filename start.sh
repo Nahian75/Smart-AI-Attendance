@@ -27,18 +27,18 @@ if [ ! -f ".env" ]; then
     echo ""
 fi
 
-# ── 3. Detect first run ───────────────────────────────────────────
-FIRST_RUN=0
-if ! docker volume inspect smart-attendance_postgres_data > /dev/null 2>&1; then
-    FIRST_RUN=1
-fi
+# ── 3. Stop any previously running stack (prevents port conflicts) ─
+echo " [CLEAN] Stopping any existing containers..."
+docker compose -f docker-compose.dev.yml down > /dev/null 2>&1 || true
 
 # ── 4. Build and start services ──────────────────────────────────
-echo " [START] Building and starting services..."
-echo " [INFO]  First build may take 3-5 minutes."
-echo ""
-
-docker compose -f docker-compose.dev.yml up -d --build
+if ! docker image inspect smart-attendance-backend > /dev/null 2>&1; then
+    echo " [BUILD] First run - building images (this takes 10-40 min, only once)..."
+    docker compose -f docker-compose.dev.yml up -d --build
+else
+    echo " [START] Starting existing containers (no rebuild)..."
+    docker compose -f docker-compose.dev.yml up -d
+fi
 
 # ── 5. Wait for backend ───────────────────────────────────────────
 echo ""
@@ -54,14 +54,12 @@ until curl -s http://localhost/health | grep -q '"ok"' 2>/dev/null; do
 done
 echo " [OK]    Backend is ready."
 
-# ── 6. Seed on first run ──────────────────────────────────────────
-if [ "$FIRST_RUN" -eq 1 ]; then
-    echo ""
-    echo " [SETUP] First run detected. Seeding the database..."
-    docker compose -f docker-compose.dev.yml exec -T backend python seed.py && \
-        echo " [OK]    Database seeded." || \
-        echo " [WARN]  Seed may have failed. Check: docker compose logs backend"
-fi
+# ── 6. Seed database (safe to run multiple times) ─────────────────
+echo ""
+echo " [SEED]  Initialising database (safe to run multiple times)..."
+docker compose -f docker-compose.dev.yml exec -T backend python seed.py && \
+    echo " [OK]    Database seeded." || \
+    echo " [WARN]  Seed may have failed. Check: docker compose logs backend"
 
 # ── 7. Wait for dashboard ─────────────────────────────────────────
 echo ""
