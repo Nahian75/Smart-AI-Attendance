@@ -9,8 +9,11 @@ Built with **YOLOv11 + ByteTrack + InsightFace (ArcFace R100)**, **FastAPI** bac
 ## Features
 
 - **Real-time Face Recognition** — YOLOv11 + ByteTrack + ArcFace R100 with FAISS vector search
+- **Dual-Pipeline Architecture** — Person detection and object alerts run on every frame (fast path); face recognition runs in a separate throttled pipeline — bags and intruders are flagged the moment they appear, not after recognition finishes
 - **Dual-Mode Recognition** — Automatic frontal mode (entrance/kiosk cameras) and CCTV/overhead mode (staircase/ceiling cameras); each uses a tuned detection strategy and threshold set
-- **Multi-Frame Temporal Voting** — Recognition decided across N frames (majority vote + mean similarity), eliminating single-frame flip-flopping
+- **Fast-Path Recognition** — Single high-confidence frame fires instantly (score ≥ threshold + margin); multi-frame voting is the fallback for ambiguous cases, eliminating flip-flopping without sacrificing speed for clear detections
+- **Night Mode Detection** — CLAHE contrast boost applied automatically on dark frames before YOLO and face detection; dark-clothed employees on dark backgrounds are detected without any manual configuration
+- **Per-Camera Head-Pose Limits** — MediaPipe yaw/pitch filter thresholds are set per camera profile; overhead/staircase cameras use wider limits (75°/70°) so downward-facing heads are not incorrectly rejected
 - **Top-K Embedding Matching** — Averages similarity across an employee's multiple enrolled embeddings for robust identification
 - **Head Pose Filter** — MediaPipe FaceLandmarker rejects side-profile and extreme-angle frames before embedding; reduces false "Unknown" votes
 - **CCTV/Overhead Detection** — Head-crop-first strategy (top 40% of person bbox) + full-frame SCRFD sweep; detects faces looking downward without angle-specific retraining
@@ -18,14 +21,14 @@ Built with **YOLOv11 + ByteTrack + InsightFace (ArcFace R100)**, **FastAPI** bac
 - **Face-Quality Gating** — Junk crops (blurry, turned away, too small) are rejected before recognition; only high-quality detections count
 - **Per-Camera Anti-Spoof Control** — MiniFASNet CNN (print+replay, AUC ~0.99) enabled for frontal/kiosk cameras; disabled for CCTV/DVR cameras where the heuristic produces false positives on compressed streams
 - **Face Mask Detection** — Detects surgical, cloth, and N95 masks; fires `masked_face` event + yellow MASKED overlay
-- **Suspicious Object Detection** — YOLO detects backpacks (class 24), handbags (class 26), and suitcases (class 28) near confirmed person tracks; fires `suspicious_object` medium-severity alert
+- **Suspicious Object Detection** — YOLO detects backpacks (class 24), handbags (class 26), and suitcases (class 28); alert fires on the **first frame** the object appears near a person (per-track 30 s cooldown prevents spam)
 - **Universal Camera Connectivity** — Auto-discovers stream type: ONVIF → RTSP (TCP/UDP/H.265) → Hikvision HCNetSDK → Dahua NetSDK
 - **Multi-GPU Support** — NVIDIA (CUDA), AMD (ROCm), Intel (OpenVINO/Arc), CPU — auto-detected at startup
-- **Security Alerts** — 10 types: intruder, blacklist, after-hours, restricted area, VIP, loitering, spoof attempt, unknown person, masked face, suspicious object
+- **Security Alerts** — 10 types with plain-language messages: intruder, blacklist, after-hours, restricted area, VIP, loitering, spoof attempt, unknown person, masked face, suspicious object
 - **Email Notifications** — SMTP email for high-severity alerts and daily attendance digest
 - **Real-Time WebSocket** — Alerts and attendance events appear instantly on dashboard (no polling)
-- **Detection Evidence Log** — Every face detection saved with enhanced padded snapshot (1024px minimum), timestamp, confidence, and camera
-- **Glassmorphism Dashboard** — Frosted-glass UI with light/dark mode toggle
+- **Detection Evidence Log** — Every face detection saved as a clean padded snapshot (512 px, exposure-corrected, no over-sharpening), with timestamp, confidence, and camera
+- **Glassmorphism Dashboard** — Frosted-glass UI with light/dark mode toggle; employee names and alert messages readable in both modes
 - **Shift Management** — Create shifts with grace periods and early-leave buffers; late/early-leave/overtime calculated automatically
 - **Role-Based Access Control** — 6-level hierarchy (super\_admin → viewer) enforced on API and UI
 - **CSV Export** — Monthly attendance reports
@@ -37,27 +40,37 @@ Built with **YOLOv11 + ByteTrack + InsightFace (ArcFace R100)**, **FastAPI** bac
 
 ```
 Camera (RTSP / ONVIF / Hikvision HCNetSDK / Dahua NetSDK / USB / HTTP MJPEG)
-  → Edge node:
-      YOLO detect → ByteTrack track
-      │
-      ├─ [every 15 frames] YOLO object scan → backpack/handbag/suitcase near person?
-      │      └─ suspicious_object alert (medium severity)
-      │
-      └─ [per confirmed track]
-          ├─ CCTV mode: head crop (top 40%) → SCRFD → fallback: full padded crop
-          ├─ Frontal mode: full padded crop → SCRFD → fallback: head crop
-          └─ full-frame SCRFD sweep, filter to person bbox
-              → face-quality gate (pixel size ≥ 80px, det_score ≥ min_det_score)
-                  └─ low-confidence: mask check → masked_face event
-              → MediaPipe head-pose filter (yaw/pitch via FaceLandmarker)
-                  └─ too angled → frame dropped (not added to vote buffer)
-              → mask check → MASKED overlay + masked_face event (60 s cooldown)
-              → anti-spoof (frontal cameras): MiniFASNet ONNX
-              → bilateral denoise + unsharp + CLAHE (LAB) enhancement
-              → ArcFace embed → top-K FAISS match
-              → padded face snapshot (60% pad, 1024px min, JPEG 97%) saved to disk
-              → multi-frame vote buffer (N frames, majority wins)
-              → decision: recognized / unknown / spoof
+  → Edge node — TWO independent pipelines per frame:
+
+  ┌─ FAST PATH (every frame, _DETECTION_EXECUTOR) ──────────────────────────────┐
+  │  _boost_dark_frame() — CLAHE if mean luminance < 80                         │
+  │  YOLO detect → ByteTrack track                                               │
+  │  └─ for each confirmed person track:                                         │
+  │       object check: backpack / handbag / suitcase near person?               │
+  │       └─ yes → suspicious_object alert (30 s per-track cooldown)             │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
+  ┌─ SLOW PATH (throttled, _INFERENCE_EXECUTOR) ────────────────────────────────┐
+  │  _boost_dark_frame() — same CLAHE pass for SCRFD / face crops               │
+  │  YOLO detect → ByteTrack track                                               │
+  │  └─ [per confirmed track]                                                    │
+  │      ├─ CCTV mode: head crop (top 40%) → SCRFD → fallback: full padded crop │
+  │      ├─ Frontal mode: full padded crop → SCRFD → fallback: head crop        │
+  │      └─ full-frame SCRFD sweep, filter to person bbox                        │
+  │          → face-quality gate (pixel size ≥ 80px, det_score ≥ min_det_score) │
+  │              └─ low-confidence: mask check → masked_face event               │
+  │          → MediaPipe head-pose filter (per-camera yaw/pitch limits)          │
+  │              └─ too angled → frame dropped (not added to vote buffer)        │
+  │          → mask check → MASKED overlay + masked_face event (60 s cooldown)  │
+  │          → anti-spoof (frontal cameras): MiniFASNet ONNX                     │
+  │          → bilateral denoise + CLAHE (LAB) enhancement (embed crop only)    │
+  │          → ArcFace embed → top-K FAISS match                                 │
+  │          → padded face snapshot (60% pad, 512px target, JPEG 95%) saved     │
+  │          → FAST-FIRE: score ≥ threshold + margin AND liveness → instant event│
+  │          → FALLBACK: multi-frame vote buffer (N frames, majority wins)       │
+  │          → decision: recognized / unknown / spoof                            │
+  └─────────────────────────────────────────────────────────────────────────────┘
+
   → POST /api/v1/attendance/event  (EDGE_TOKEN auth)
   → Backend: event type routing:
       suspicious_object / masked_face → alert only
@@ -194,20 +207,30 @@ All thresholds in `edge/config/camera_config.yaml` — **no rebuild needed**, ju
 ```yaml
 recognition_threshold: 0.45   # raise to 0.55+ for quality cameras
 min_det_score: 0.40            # minimum face detection confidence (raised for 1080P+)
-vote_window: 6                 # frames to collect per person
-min_votes: 4                   # minimum frames before deciding
+vote_window: 4                 # frames to collect per person (fallback voting path)
+min_votes: 2                   # minimum frames before deciding (fallback voting path)
 vote_ttl_seconds: 8            # drop buffer if person absent this long
 cooldown_seconds: 300          # suppress re-detection for 5 min
-enhance_faces: true            # bilateral denoise + unsharp + CLAHE
+enhance_faces: true            # bilateral denoise + CLAHE on the embedding crop only
 
-# MediaPipe head-pose filter
-mp_max_yaw: 60.0               # reject faces rotated > this many degrees left/right
-mp_max_pitch: 45.0             # reject faces tilted > this many degrees up/down
+# Fast-path recognition — fires on the first frame with a confident match
+fast_recognize_margin: 0.10    # score must exceed threshold by this much to fast-fire
+                               # set to 0 to disable (always use vote buffer)
+
+# Object / bag alert cooldown (fast path)
+bag_cooldown_seconds: 30       # seconds before a second alert fires for the same track
+
+# MediaPipe head-pose filter (set per camera profile in profiles: section)
+mp_max_yaw: 65.0               # reject faces rotated > this many degrees left/right
+mp_max_pitch: 50.0             # reject faces tilted > this many degrees up/down
+                               # overhead/staircase profiles use 75°/70° by default
 
 # Mask detection
 mask_threshold: 0.72           # raised to prevent glasses false positives
 mask_cooldown_seconds: 60      # seconds between repeat masked_face alerts
 ```
+
+> **Per-camera head-pose:** Override `mp_max_yaw` / `mp_max_pitch` inside a profile block in `camera_config.yaml` to set tighter or wider limits for individual camera types without affecting other cameras.
 
 To apply: `docker compose restart edge_node`
 
@@ -215,6 +238,9 @@ To apply: `docker compose restart edge_node`
 - Enrolled employees missed → lower `recognition_threshold` (try 0.38)
 - Wrong people matching → raise `recognition_threshold` (try 0.55)
 - Real faces rejected as spoof → lower `liveness_threshold` (try 0.32)
+- Employee walks past and is not recorded → lower `fast_recognize_margin` (try `0.07`) or set `min_votes: 1`
+- Too many bag alerts for the same person → raise `bag_cooldown_seconds` (try `60`)
+- Employees not visible in dark environments → check edge logs for `mean_lum`; CLAHE runs automatically if luminance < 80
 - Best improvement: re-enroll with 3–5 photos taken under the same lighting as the camera
 
 ---
@@ -244,7 +270,7 @@ Gmail: use an **App Password** (not your account password). Go to Google Account
 | Overview | `/dashboard` | Stat cards, live cameras, occupancy, weekly/hourly charts, recent check-ins, live feed, alerts |
 | Employees | `/dashboard/employees` | Employee list, face enrollment, blacklist/VIP flags |
 | Cameras | `/dashboard/cameras` | Camera cards with MJPEG streams, add/edit/delete |
-| Detection Log | `/dashboard/detection-log` | Every face detection: 1024px snapshot, timestamp, confidence, camera |
+| Detection Log | `/dashboard/detection-log` | Every face detection: clean 512 px snapshot, timestamp, confidence, camera |
 | Alerts | `/dashboard/alerts` | All alert types, unacknowledged filter |
 | Security Alerts | `/dashboard/security-alerts` | High-severity incidents + loitering section |
 | Shifts | `/dashboard/shifts` | Create/edit shifts, assign employees |
@@ -425,6 +451,19 @@ oculus/
 
 ## Troubleshooting
 
+**Employee walks past too quickly and is not recorded**
+- The fast-recognition path fires on the first frame where `score ≥ threshold + fast_recognize_margin`; lower `fast_recognize_margin` (try `0.07`) in `camera_config.yaml` to make it fire sooner
+- Also set `min_votes: 1` so the voting fallback fires on the very first clean frame
+- If the face is genuinely too small or blurry, reposition the camera so faces are ≥ 80 px wide in the frame
+
+**Bags / objects not alerted immediately**
+- Object alerts now fire on the very first frame the object appears (fast path, every frame); if you see delays check that `_detection_busy` is not stuck — restart the edge node
+- To reduce alert spam per person raise `bag_cooldown_seconds` (default `30`)
+
+**Dark clothing / dark background — employees not detected at night**
+- CLAHE night-mode boost is automatic when frame luminance < 80; no configuration needed
+- If still missed, check camera IR is active and point-of-view is within ~3–5 m of the subject
+
 **Anti-spoof triggers on real people**
 - Lower `liveness_threshold` in `camera_config.yaml` (try 0.25)
 - If heuristic is running (no ONNX model): check `edge/weights/antispoof_128.onnx` exists
@@ -433,6 +472,9 @@ oculus/
 - Check edge logs for `best_sim=` values
 - If sim is 0.35–0.45: lower `recognition_threshold`, re-enroll with better photos
 - Make sure embeddings synced: look for `FAISS index resynced: N face embeddings`
+
+**Alert messages show raw IDs instead of names**
+- Ensure the backend has been restarted after the latest update; alert messages now always resolve the camera and employee name before firing
 
 **Head-pose filter rejecting too many frames**
 - Raise `mp_max_yaw` / `mp_max_pitch` in `camera_config.yaml`

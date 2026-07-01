@@ -29,9 +29,12 @@ export interface LiveEvent {
   employee_id?: string | null;
   employee_name?: string | null;
   department?: string | null;
+  direction?: string | null;
   status?: string;
   is_late?: boolean;
   late_by_min?: number;
+  is_early_leave?: boolean;
+  early_by_min?: number;
   overtime_seconds?: number;
   // Raw edge event fields
   type?: string;

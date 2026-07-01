@@ -9,6 +9,7 @@ import { clearSession } from "@/lib/auth";
 import { useRole, ROLE_LABELS, ROLE_COLORS } from "@/lib/rbac";
 import { api } from "@/lib/api";
 import ThemeToggle from "@/components/ui/ThemeToggle";
+import ToastProvider from "@/components/ui/ToastProvider";
 
 const NAV = [
   { label: "Overview",        icon: BarChart3,   href: "/dashboard" },
@@ -212,6 +213,7 @@ export default function DashboardShell({ children }: { children: React.ReactNode
       </main>
 
       {showPwModal && <ChangePasswordModal onClose={() => setShowPwModal(false)} />}
+      <ToastProvider />
     </div>
   );
 }

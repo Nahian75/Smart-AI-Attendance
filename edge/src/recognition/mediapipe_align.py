@@ -130,7 +130,9 @@ class MediaPipeFaceAligner:
 
     # ── Public API ────────────────────────────────────────────────────────────
 
-    def process(self, face_img: np.ndarray) -> tuple[np.ndarray, bool]:
+    def process(self, face_img: np.ndarray,
+                max_yaw: float | None = None,
+                max_pitch: float | None = None) -> tuple[np.ndarray, bool]:
         """
         Run head-pose check on a face crop. Always returns the ORIGINAL image.
 
@@ -193,10 +195,13 @@ class MediaPipeFaceAligner:
         nose_dy = (nose_tip[1] - eye_mid[1]) / eye_dist   # pitch proxy
 
         # Convert degree thresholds to the nose_dx / nose_dy coordinate scale.
+        # Per-call overrides allow each camera to use different pose limits.
+        _max_yaw   = max_yaw   if max_yaw   is not None else self.max_yaw
+        _max_pitch = max_pitch if max_pitch is not None else self.max_pitch
         # nose_dx ≈ sin(yaw) × 0.5 → degrees ≈ nose_dx × 115
-        yaw_limit   = min(self.max_yaw / 115.0, 0.55)
+        yaw_limit   = min(_max_yaw / 115.0, 0.55)
         # nose_dy range (0.10 → 0.75) spans ~90° of pitch; center ≈ 0.425
-        pitch_margin = (self.max_pitch / 90.0) * 0.325
+        pitch_margin = (_max_pitch / 90.0) * 0.325
         pitch_lo = max(0.05, 0.425 - pitch_margin)
         pitch_hi = min(0.90, 0.425 + pitch_margin)
 

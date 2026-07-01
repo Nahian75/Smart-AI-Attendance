@@ -27,7 +27,7 @@ interface Stats {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8080";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost";
 
 function token() {
   return typeof window !== "undefined" ? localStorage.getItem("token") : null;

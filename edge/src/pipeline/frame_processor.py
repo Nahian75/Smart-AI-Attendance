@@ -39,6 +39,9 @@ _CLR_MASKED  = (0, 220, 220)   # yellow  — face mask detected
 _FONT        = cv2.FONT_HERSHEY_SIMPLEX
 
 _INFERENCE_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="inference")
+# Fast detection runs on a separate pool so YOLO + bag alerts fire every frame
+# regardless of whether face recognition is busy.
+_DETECTION_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="detection")
 # One worker per camera so multiple cameras can encode frames concurrently.
 # max_workers=4 covers up to 4 cameras; extra cameras share the last slot.
 _MJPEG_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="mjpeg-encode")
@@ -79,9 +82,9 @@ def _enhance_face(face_img: np.ndarray) -> np.ndarray:
     # 1. Mild bilateral denoise — lighter pass so it doesn't smooth texture
     work = cv2.bilateralFilter(work, d=3, sigmaColor=20, sigmaSpace=3)
 
-    # 2. Unsharp mask
+    # 2. Unsharp mask — kept mild to avoid halos on compressed CCTV frames
     blurred = cv2.GaussianBlur(work, (0, 0), sigmaX=1.2)
-    work = cv2.addWeighted(work, 1.8, blurred, -0.8, 0)
+    work = cv2.addWeighted(work, 1.3, blurred, -0.3, 0)
     work = np.clip(work, 0, 255).astype(np.uint8)
 
     # 3. CLAHE on L channel only (avoids colour shifts)
@@ -135,13 +138,26 @@ class FrameProcessor:
         # ── Voting / quality parameters (all tunable via camera_config.yaml) ──
         self.min_det_score  = float(config.get("min_det_score", 0.50))
         self.enhance_faces  = bool(config.get("enhance_faces", True))
-        self.vote_window   = int(config.get("vote_window", 7))
+        self.vote_window   = int(config.get("vote_window", 4))
         _sr_model = config.get("superres_model", "edge/weights/FSRCNN_x2.pb")
         self._face_sr = FaceSuperRes(_sr_model) if config.get("superres", True) else None
-        self.min_votes     = int(config.get("min_votes", 4))
+        self.min_votes     = int(config.get("min_votes", 2))
         self.obs_ttl_s     = float(config.get("vote_ttl_seconds", 5))
+        # fast_recognize_margin: how far above the recognition threshold a single
+        # frame's score must be to fire immediately without waiting for min_votes.
+        # Set to 0 to disable fast-path (always wait for min_votes).
+        self.fast_recognize_margin = float(config.get("fast_recognize_margin", 0.12))
 
-        self._busy = False  # drop-if-busy gate — prevents executor queue buildup
+        # Per-camera head-pose limits — override the shared aligner's global defaults.
+        self._mp_max_yaw   = float(config.get("mp_max_yaw",   65.0))
+        self._mp_max_pitch = float(config.get("mp_max_pitch", 50.0))
+
+        self._busy = False            # gate for face recognition (slow path)
+        self._detection_busy = False  # gate for person/object detection (fast path)
+        # Per-track bag alert cooldown — suppresses repeat alerts for the same
+        # person carrying the same bag without spamming on every frame.
+        self._bag_alert_cooldown: dict[int, float] = {}
+        self._bag_cooldown_s = float(config.get("bag_cooldown_seconds", 30.0))
         self._cooldown: dict[int, float] = {}
         self._mask_cooldown: dict[int, float] = {}
         self._track_obs: dict[int, list[dict]] = {}
@@ -176,6 +192,77 @@ class FrameProcessor:
             self._mjpeg_busy = True
             _MJPEG_EXECUTOR.submit(self._encode_and_push, frame)
 
+    async def detect_and_alert(self, frame: np.ndarray, ts: float):
+        """Fast path — runs on every frame, independent of face recognition.
+
+        Handles:
+          • YOLO person detection + ByteTrack (updates live display immediately)
+          • Suspicious object detection (bag, suitcase, backpack) with per-track
+            cooldown — fires alert the moment an object appears near a person,
+            not after 15 frames like the old throttled approach.
+
+        Face recognition is NOT done here — that stays in the slow `process()`
+        path so it never blocks this fast loop.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            events = await loop.run_in_executor(
+                _DETECTION_EXECUTOR, self._detect_sync, frame, ts
+            )
+        finally:
+            self._detection_busy = False
+        for event in events:
+            asyncio.create_task(self.publisher.publish(event))
+
+    def _detect_sync(self, frame: np.ndarray, ts: float) -> list[dict]:
+        """Synchronous fast detection: YOLO tracking + object alerts only."""
+        events: list[dict] = []
+        detect_frame = self._boost_dark_frame(frame)
+        tracks = self.detector.track(detect_frame)
+        # Update shared state so MJPEG overlay always reflects latest tracks
+        self._last_tracks = tracks
+        for t in tracks:
+            self._track_seen[t.track_id] = ts
+
+        if not self.detect_bags or not tracks:
+            return events
+
+        try:
+            objects = self.detector.detect_objects(detect_frame)
+            for obj in objects:
+                ox = (obj.bbox[0] + obj.bbox[2]) / 2
+                oy = (obj.bbox[1] + obj.bbox[3]) / 2
+                for t in tracks:
+                    pw = t.bbox[2] - t.bbox[0]
+                    ph = t.bbox[3] - t.bbox[1]
+                    mx, my = max(60, pw * 0.6), max(60, ph * 0.6)
+                    if not (t.bbox[0] - mx <= ox <= t.bbox[2] + mx and
+                            t.bbox[1] - my <= oy <= t.bbox[3] + my):
+                        continue
+                    # Per-track cooldown — don't repeat alert for same person's bag
+                    last = self._bag_alert_cooldown.get(t.track_id, 0)
+                    if ts - last < self._bag_cooldown_s:
+                        break
+                    self._bag_alert_cooldown[t.track_id] = ts
+                    snap = self._save_snapshot(frame, None, ts, is_unknown=True)
+                    log.info("[%s] %s detected near person track=%d (conf=%.2f)",
+                             self.camera_id, obj.label, t.track_id, obj.confidence)
+                    events.append({
+                        "type": "suspicious_object",
+                        "camera_id": self.camera_id,
+                        "object_label": obj.label,
+                        "confidence": round(float(obj.confidence), 3),
+                        "snapshot_url": snap,
+                        "timestamp": ts,
+                        "employee_id": None,
+                        "is_live": True,
+                        "spoof_score": 0.0,
+                    })
+                    break
+        except Exception as exc:
+            log.warning("[%s] object detection error: %s", self.camera_id, exc)
+        return events
+
     async def process(self, frame: np.ndarray, ts: float):
         # _busy is set True by the dispatch thread before scheduling this coroutine.
         # The finally block releases it so the next frame can be scheduled.
@@ -188,11 +275,40 @@ class FrameProcessor:
         for event in events:
             asyncio.create_task(self.publisher.publish(event))
 
+    @staticmethod
+    def _boost_dark_frame(frame: np.ndarray) -> np.ndarray:
+        """Increase contrast on dark frames before YOLO + SCRFD detection.
+
+        At night, employees wearing dark clothing blend into dark backgrounds
+        and YOLO misses them entirely. Applying CLAHE on the luminance channel
+        lifts both the person and the background — but YOLO's edge detection
+        picks up the person shape which now has visible contrast.
+
+        Only runs when mean luminance < 80 (0–255). Bright frames pass through
+        unchanged. The enhanced frame is used for detection only — original
+        frame is kept for snapshot saving so lighting looks natural on disk.
+        """
+        if frame is None or frame.size == 0:
+            return frame
+        mean_lum = float(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean())
+        if mean_lum >= 80:
+            return frame
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        # Stronger clip for darker frames: clip=6 at pitch black, clip=2 at lum=80
+        clip = max(2.0, 6.0 * (1.0 - mean_lum / 80.0))
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
     def _process_sync(self, frame: np.ndarray, ts: float) -> list[dict]:
         events: list[dict] = []
         self._frame_count += 1
 
-        tracks = self.detector.track(frame)
+        # Boost dark frames for YOLO + SCRFD — original frame kept for snapshots
+        detect_frame = self._boost_dark_frame(frame)
+
+        tracks = self.detector.track(detect_frame)
         self._last_tracks = tracks
         for t in tracks:
             self._track_seen[t.track_id] = ts
@@ -205,44 +321,7 @@ class FrameProcessor:
             )
             self._last_log = ts
 
-        # ── Bag / suspicious object detection ────────────────────────────────
-        # Runs every 15 frames (~1.5s at 10fps) to avoid GPU contention with
-        # the face recognition pipeline. Only fires when a person is present.
-        if self.detect_bags and tracks and self._frame_count % 15 == 0:
-            try:
-                objects = self.detector.detect_objects(frame)
-                for obj in objects:
-                    # Alert if the object overlaps or is near any person track.
-                    # Margin = 60% of person width/height so it scales with
-                    # frame resolution and camera distance (staircase vs. kiosk).
-                    ox = (obj.bbox[0] + obj.bbox[2]) / 2
-                    oy = (obj.bbox[1] + obj.bbox[3]) / 2
-                    near_person = False
-                    for t in tracks:
-                        pw = t.bbox[2] - t.bbox[0]
-                        ph = t.bbox[3] - t.bbox[1]
-                        mx, my = max(60, pw * 0.6), max(60, ph * 0.6)
-                        if (t.bbox[0] - mx <= ox <= t.bbox[2] + mx and
-                                t.bbox[1] - my <= oy <= t.bbox[3] + my):
-                            near_person = True
-                            break
-                    if near_person:
-                        snap = self._save_snapshot(frame, None, ts, is_unknown=True)
-                        log.info("[%s] %s detected near person (conf=%.2f)",
-                                 self.camera_id, obj.label, obj.confidence)
-                        events.append({
-                            "type": "suspicious_object",
-                            "camera_id": self.camera_id,
-                            "object_label": obj.label,
-                            "confidence": round(float(obj.confidence), 3),
-                            "snapshot_url": snap,
-                            "timestamp": ts,
-                            "employee_id": None,
-                            "is_live": True,
-                            "spoof_score": 0.0,
-                        })
-            except Exception as exc:
-                log.warning("[%s] bag detection error: %s", self.camera_id, exc)
+        # Bag/object detection handled by detect_and_alert() fast path — removed here.
 
         self._prune_stale(ts)
 
@@ -259,7 +338,7 @@ class FrameProcessor:
         # Pseudo track-id is derived from the quantised face position so votes
         # accumulate across frames for a roughly stationary face.
         if self._ff_frame_id != self._frame_count:
-            self._ff_faces    = self.recognizer.detect_and_embed(frame)
+            self._ff_faces    = self.recognizer.detect_and_embed(detect_frame)
             self._ff_frame_id = self._frame_count
         _H, _W = frame.shape[:2]
         for _f in self._ff_faces:
@@ -289,8 +368,8 @@ class FrameProcessor:
             # above the YOLO person bbox centroid, so 60% padding ensures it's
             # fully included. Frontal cameras use 30% (enough for close faces).
             pad       = 0.60 if self.cctv_mode else 0.30
-            crop      = self._crop_padded(frame, tr.bbox, pad=pad)
-            head_crop = self._crop_head(frame, tr.bbox)
+            crop      = self._crop_padded(detect_frame, tr.bbox, pad=pad)
+            head_crop = self._crop_head(detect_frame, tr.bbox)
             if crop.size == 0:
                 continue
 
@@ -330,11 +409,11 @@ class FrameProcessor:
             # Pick the highest-quality face
             bbox, embedding, det_score = max(faces, key=lambda f: f[2])
 
-            # Extract the face image from the correct coordinate space:
-            # full-frame bbox → crop from `frame`; fallback bbox → crop from the
-            # crop image it was detected in.
+            # Extract face crop from the enhanced frame (detect_frame) so ArcFace
+            # gets a brighter, higher-contrast crop at night.
+            # Snapshot source uses original frame so saved images look natural.
             if face_from_full:
-                face_img = self._crop(frame, bbox)
+                face_img = self._crop(detect_frame, bbox)
             else:
                 face_img = self._crop(fallback_crop, bbox)
 
@@ -369,7 +448,11 @@ class FrameProcessor:
             # canonical ArcFace 112×112 alignment before embedding.
             # Skipped transparently when mediapipe is not installed.
             if self.face_aligner is not None and self.face_aligner.available:
-                face_img, is_frontal = self.face_aligner.process(face_img)
+                face_img, is_frontal = self.face_aligner.process(
+                    face_img,
+                    max_yaw=self._mp_max_yaw,
+                    max_pitch=self._mp_max_pitch,
+                )
                 if self._frame_count % 5 == 0:
                     log.debug("[%s] MediaPipe frontal=%s track=%d", self.camera_id, is_frontal, tr.track_id)
                 if not is_frontal:
@@ -414,15 +497,10 @@ class FrameProcessor:
             # pass, else in person-crop coords.
             _snap_src = frame if face_from_full else (fallback_crop if fallback_crop is not None else crop)
             face_snap = self._crop_padded(_snap_src, bbox, pad=0.60)
-            # Apply exposure fix + enhancement to the snapshot crop so security
-            # footage is clear regardless of lighting or camera quality.
+            # Snapshot: exposure fix only. No sharpening/SR on the padded crop —
+            # unsharp mask on compressed CCTV frames creates halos and color fringing.
             if face_snap.size > 0:
                 face_snap = self._fix_exposure(face_snap)
-                face_snap = _enhance_face(face_snap)
-                # 2× upscale snapshot before save — Lanczos fallback when FSRCNN
-                # unavailable; still gives more pixels for the display thumbnail.
-                if self._face_sr:
-                    face_snap = self._face_sr.upscale(face_snap)
 
             obs = {
                 "emp_id": emp_id, "score": float(score),
@@ -450,6 +528,22 @@ class FrameProcessor:
             if in_cooldown:
                 # Still collecting for display; skip attendance event.
                 continue
+
+            # ── Fast-recognition path ─────────────────────────────────────────
+            # When a single frame scores well above the threshold and liveness
+            # passes, fire immediately rather than waiting for min_votes.
+            # This prevents the common "employee walks past quickly" miss.
+            if (self.fast_recognize_margin > 0
+                    and obs["is_live"]
+                    and obs["emp_id"] is not None
+                    and obs["score"] >= self.recognition_threshold + self.fast_recognize_margin):
+                ev = self._decide_fast(tr.track_id, obs, ts)
+                if ev is not None:
+                    events.append(ev)
+                    self._cooldown[tr.track_id] = ts
+                    self._track_obs.pop(tr.track_id, None)
+                    self._spoof_tracks.discard(tr.track_id)
+                    continue
 
             if len(buf) >= self.min_votes:
                 ev = self._decide(tr.track_id, buf, ts)
@@ -521,6 +615,29 @@ class FrameProcessor:
         return events
 
     # ── Decision engine ───────────────────────────────────────────────────
+    def _decide_fast(self, track_id: int, obs: dict, ts: float):
+        """Fire a recognition event immediately from a single high-confidence frame.
+
+        Used when score exceeds threshold + fast_recognize_margin so we don't
+        wait for min_votes and miss employees who walk quickly past the camera.
+        """
+        emp_id = obs["emp_id"]
+        name = self._id_to_name.get(str(emp_id), str(emp_id)[:8])
+        log.info(f"[{self.camera_id}] FAST-RECOGNIZED {name} (emp={emp_id}) "
+                 f"sim={obs['score']:.3f} (fast-path, single frame)")
+        self._track_labels[track_id] = (name, _CLR_KNOWN)
+        snap = self._save_snapshot(
+            obs.get("face_snap", obs.get("face_img")), emp_id, ts, already_enhanced=True
+        )
+        return {
+            "type": "recognition", "camera_id": self.camera_id,
+            "direction": self.direction, "track_id": track_id,
+            "employee_id": emp_id, "confidence": round(obs["score"], 4),
+            "is_live": True, "spoof_score": round(obs["spoof_score"], 4),
+            "embedding_dist": round(1 - obs["score"], 5), "snapshot_url": snap,
+            "timestamp": ts,
+        }
+
     def _decide(self, track_id: int, buf: list[dict], ts: float):
         n = len(buf)
         majority = max(2, math.ceil(n / 2))
@@ -643,6 +760,7 @@ class FrameProcessor:
                 self._track_obs.pop(tid, None)
                 self._spoof_tracks.discard(tid)
                 self._mask_cooldown.pop(tid, None)
+                self._bag_alert_cooldown.pop(tid, None)
                 self.anti_spoof.clear_track(tid)
 
     def _encode_and_push(self, frame: np.ndarray) -> None:
@@ -661,6 +779,8 @@ class FrameProcessor:
             else:
                 preview = frame
                 scale = 1.0
+            # Boost dark frames so operator can see clearly at night
+            preview = self._boost_dark_frame(preview)
             annotated = self._draw_overlays(preview, self._last_tracks, bbox_scale=scale)
             _, jpeg = cv2.imencode(".jpg", annotated, [cv2.IMWRITE_JPEG_QUALITY, 60])
             self._mjpeg.put_frame(self.camera_id, jpeg.tobytes())
@@ -796,21 +916,16 @@ class FrameProcessor:
                 return path
 
             if not already_enhanced:
-                # Fix dark / underexposed frames, then enhance texture.
                 img = self._fix_exposure(img)
-                img = _enhance_face(img)
 
-            # 3. Enforce a minimum display size — 1024px for crisp log thumbnails
-            #    at 1080P source quality. Larger base → less interpolation damage.
+            # Enforce a minimum display size for log thumbnails.
+            # 512px is enough for the UI — upscaling to 1024px from an 80px
+            # source only amplifies compression artifacts.
             h, w = img.shape[:2]
-            if h < 1024 or w < 1024:
-                scale = max(1024 / h, 1024 / w)
+            if h < 512 or w < 512:
+                scale = max(512 / h, 512 / w)
                 img = cv2.resize(img, (int(w * scale), int(h * scale)),
                                  interpolation=cv2.INTER_LANCZOS4)
-                # Sharpening pass after final upscale to recover edge crispness.
-                blurred = cv2.GaussianBlur(img, (0, 0), sigmaX=1.0)
-                img = cv2.addWeighted(img, 1.6, blurred, -0.6, 0)
-                img = np.clip(img, 0, 255).astype(np.uint8)
 
             # 4. Save at high quality.
             cv2.imwrite(path, img, [cv2.IMWRITE_JPEG_QUALITY, 97])

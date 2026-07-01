@@ -40,11 +40,15 @@ echo.
 echo  [WAIT]  Waiting for backend...
 :waitloop
 curl -s http://localhost/health 2>nul | findstr /c:"ok" >nul 2>&1
-if not errorlevel 1 goto ready
+if not errorlevel 1 goto seed
 timeout /t 2 >nul
 goto waitloop
 
-:ready
+:seed
+echo  [SEED]  Initialising database (safe to run multiple times^)...
+docker compose -f docker-compose.dev.yml exec -T backend python seed.py
+echo.
+
 echo  [OK]    All services are running.
 echo.
 echo  ================================================

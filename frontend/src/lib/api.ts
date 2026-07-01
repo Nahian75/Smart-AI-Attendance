@@ -19,7 +19,7 @@ export interface AssignmentRow {
   shift_start: string; shift_end: string;
   effective_from: string; effective_to: string | null;
 }
-const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost";
 
 function authHeaders(): Record<string, string> {
   if (typeof window === "undefined") return {};

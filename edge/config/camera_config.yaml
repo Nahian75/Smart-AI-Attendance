@@ -26,27 +26,26 @@ mask_det_min: 0.25
 enhance_faces: true
 superres: false
 superres_model: edge/weights/FSRCNN_x2.pb
-vote_window: 6
-min_votes: 4
-fps_target: 0
-vote_ttl_seconds: 8
-cooldown_seconds: 300
-mp_max_yaw: 60.0
-mp_max_pitch: 45.0
 
-# Mask detection threshold — raised from 0.55 to 0.72 to prevent glasses
-# (especially tinted/reflective lenses) from triggering false MASKED alerts.
-# Real surgical/cloth masks produce stronger occlusion signals (>0.72).
+# Voting: min_votes=2 means a decision fires after just 2 clean frames.
+# vote_window=4 is the max buffer before forcing a decision.
+# fast_recognize_margin: if a single frame scores (threshold + margin), fire
+# immediately without waiting for min_votes. Set 0 to disable.
+vote_window: 4
+min_votes: 2
+fast_recognize_margin: 0.10
+
+fps_target: 0
+vote_ttl_seconds: 5
+cooldown_seconds: 300
+
+# MediaPipe head-pose limits (degrees). Faces outside these angles are skipped.
+mp_max_yaw: 65.0
+mp_max_pitch: 50.0
+
+# Mask detection threshold — raised to prevent glasses false positives.
 mask_threshold: 0.72
 
-# skip_antispoof: true  = bypass liveness check for this camera.
-#   Use for CCTV/overhead cameras — the heuristic fallback produces near-100%
-#   false-positive rate on DVR-compressed RTSP streams at CCTV angles.
-#   The real MiniFASNet model (if antispoof_128.onnx is present) still works
-#   correctly on frontal cameras.
-#
-# detect_bags: true  = fire suspicious_object alert when YOLO detects a
-#   backpack, handbag, or suitcase near a confirmed person track.
 skip_antispoof: false
 detect_bags: true
 
@@ -56,20 +55,23 @@ detect_bags: true
 camera_profiles:
 
   # ── Dedicated face-check kiosk / entrance gate ───────────────────────────
-  # Close-range frontal camera. Anti-spoof ON — real spoof attacks happen here.
+  # Close-range frontal. Anti-spoof ON. Enhancement OFF (no need at close range).
+  # Fastest path: fast_recognize_margin=0.08 fires on 1 frame; min_votes=1 as fallback.
   - match: ["kiosk", "gate", "reception", "checkin", "check-in", "lobby"]
     cctv_mode: false
     skip_antispoof: false
     detect_bags: false
-    recognition_threshold: 0.55
-    liveness_threshold: 0.45
+    recognition_threshold: 0.48
+    liveness_threshold: 0.42
     min_det_score: 0.45
     enhance_faces: false
     superres: false
+    min_votes: 1
+    vote_window: 3
+    fast_recognize_margin: 0.08
 
   # ── Hikvision DVR entrance/exit channels ─────────────────────────────────
-  # Wall-mounted cameras on 1080P main stream. Anti-spoof ON.
-  # min_det_score raised from 0.32 → 0.40 — 1080P crops give stronger signals.
+  # Wall-mounted frontal cameras on 1080P main stream. Anti-spoof ON.
   - match: ["hik", "dvr", "hikvision", "level 1", "entrance"]
     cctv_mode: false
     skip_antispoof: false
@@ -79,26 +81,41 @@ camera_profiles:
     min_det_score: 0.40
     enhance_faces: true
     superres: false
+    min_votes: 2
+    vote_window: 4
+    fast_recognize_margin: 0.10
 
+  # ── Overhead / staircase / ceiling CCTV cameras ──────────────────────────
+  # People look downward — head-pose limits widened so angled faces are not
+  # filtered out. Anti-spoof OFF (heuristic gives 100% false positives on DVR).
+  # Lower threshold (0.38) compensates for reduced embedding quality at angles.
   - match: ["ceiling", "overhead", "cctv", "staircase", "level 2", "interior", "floor"]
     cctv_mode: true
     skip_antispoof: true
     detect_bags: true
     recognition_threshold: 0.38
     liveness_threshold: 0.25
-    min_det_score: 0.38
+    min_det_score: 0.32
     enhance_faces: true
     superres: false
+    min_votes: 2
+    vote_window: 4
+    fast_recognize_margin: 0.08
+    mp_max_yaw: 75.0
+    mp_max_pitch: 70.0
 
   - match: ["hivideo", "hiv", "v380", "wifi", "ip cam", "ipcam"]
     cctv_mode: false
-    skip_antispoof: true
-    detect_bags: true
-    recognition_threshold: 0.40
+    skip_antispoof: true          # HiVideo heavy compression causes anti-spoof false positives
+    detect_bags: false            # frontal entrance — no bag detection needed
+    recognition_threshold: 0.43
     liveness_threshold: 0.35
-    min_det_score: 0.30
-    enhance_faces: true
+    min_det_score: 0.32
+    enhance_faces: true           # budget sensor benefits from enhancement
     superres: false
+    min_votes: 1                  # frontal close-range — single clean frame is enough
+    vote_window: 3
+    fast_recognize_margin: 0.07   # fire very fast on confident match
 
   # ── Meeting room cameras ──────────────────────────────────────────────────
   - match: ["meeting", "conference", "boardroom"]
@@ -110,6 +127,11 @@ camera_profiles:
     min_det_score: 0.22
     enhance_faces: true
     superres: false
+    min_votes: 2
+    vote_window: 4
+    fast_recognize_margin: 0.08
+    mp_max_yaw: 75.0
+    mp_max_pitch: 70.0
 
 # ════════════════════════════════════════════════════════════════════════════
 #  CAMERA SOURCES (fallback if backend API unreachable at startup)

@@ -313,7 +313,7 @@ export default function EmployeesPage() {
             {employees.map(emp => (
               <tr key={emp.id} className={`border-b dark:border-gray-700 last:border-0 hover:bg-gray-50 dark:hover:bg-gray-700/50 transition-colors ${!emp.is_active ? "opacity-50" : ""}`}>
                 <td className="px-4 py-3">
-                  <span className="font-medium text-gray-900">{emp.full_name}</span>
+                  <span className="font-medium text-gray-900 dark:text-white">{emp.full_name || "—"}</span>
                 </td>
                 <td className="px-4 py-3 font-mono text-xs text-gray-500">{emp.employee_code || "—"}</td>
                 <td className="px-4 py-3 text-gray-500 text-xs">{emp.email || "—"}</td>

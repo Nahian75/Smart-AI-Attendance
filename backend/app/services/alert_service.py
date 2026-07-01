@@ -136,7 +136,7 @@ class AlertService:
             await self.redis.delete(key)
             await self.fire(
                 tenant_id, "loitering",
-                f"{employee_name} has been near {camera_id} for {int(dwell_min)} minutes",
+                f"{employee_name} has been standing in the same area for over {int(dwell_min)} minutes. Please check if everything is okay.",
                 employee_id=employee_id, camera_id=camera_id, snapshot_url=snapshot_url,
             )
             return True

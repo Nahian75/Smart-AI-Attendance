@@ -224,8 +224,15 @@ def _start_reader(cam: dict, processor: FrameProcessor, cfg: dict,
     def make_cb(proc):
         def cb(frame, ts):
             proc.push_mjpeg(frame)
-            # Claim the busy slot here (dispatch thread) so there is no TOCTOU
-            # window between the check and the coroutine actually setting _busy.
+            # Fast path: person detection + object/bag alerts — runs every frame.
+            # Never blocked by face recognition so bags and people are flagged
+            # the moment they appear, even if recognition is still running.
+            if not proc._detection_busy:
+                proc._detection_busy = True
+                asyncio.run_coroutine_threadsafe(
+                    proc.detect_and_alert(frame, ts), loop
+                )
+            # Slow path: face recognition — throttled to avoid queue buildup.
             if not proc._busy:
                 proc._busy = True
                 asyncio.run_coroutine_threadsafe(proc.process(frame, ts), loop)

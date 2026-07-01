@@ -46,10 +46,10 @@ class AttendanceService:
         if event.get("type") == "suspicious_object":
             label = event.get("object_label", "suspicious object")
             cam = await self.db.get(Camera, camera_id) if camera_id else None
-            cam_name = cam.name if cam else str(camera_id)
+            cam_name = cam.name if cam else "a camera"
             await self.alerts.fire(
                 tenant_id, "suspicious_object",
-                f"{label.capitalize()} detected near person on camera {cam_name}",
+                f"A {label} was spotted near someone on {cam_name}. Please check the area.",
                 camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
             )
             await self.db.commit()
@@ -58,10 +58,10 @@ class AttendanceService:
         # ── Masked face event ──────────────────────────────────────────────
         if event.get("type") == "masked_face":
             cam = await self.db.get(Camera, camera_id) if camera_id else None
-            cam_name = cam.name if cam else str(camera_id)
+            cam_name = cam.name if cam else "a camera"
             await self.alerts.fire(
                 tenant_id, "masked_face",
-                f"Face mask detected on camera {cam_name}",
+                f"Someone wearing a face covering was seen on {cam_name}. Identity could not be confirmed.",
                 camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
             )
             await self.db.commit()
@@ -70,9 +70,11 @@ class AttendanceService:
         # PRD §6.3: liveness gate at 0.80
         if not event.get("is_live", True):
             logger.warning("spoof_detected cam=%s conf=%.3f", camera_id, conf)
+            _spoof_cam = await self.db.get(Camera, camera_id) if camera_id else None
+            _spoof_cam_name = _spoof_cam.name if _spoof_cam else "a camera"
             await self.alerts.fire(
                 tenant_id, "spoof_attempt",
-                f"Spoof attempt on camera {camera_id}",
+                f"Someone tried to use a photo or screen to fool the camera on {_spoof_cam_name}. Access was blocked.",
                 camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
             )
             await self._store_event(event, tenant_id)
@@ -84,7 +86,7 @@ class AttendanceService:
         if cam and cam.is_restricted:
             await self.alerts.fire(
                 tenant_id, "restricted_area",
-                f"Detection in restricted area: {cam.name}",
+                f"Someone entered a restricted area monitored by {cam.name}. Please verify authorisation.",
                 camera_id=camera_id, snapshot_url=event.get("snapshot_url"),
             )
 
@@ -122,7 +124,7 @@ class AttendanceService:
         if employee.is_blacklisted:
             await self.alerts.fire(
                 tenant_id, "blacklist",
-                f"Blacklisted employee detected: {employee.full_name}",
+                f"{employee.full_name} has been spotted on camera — this person is on the blocked list. Immediate attention required.",
                 employee_id=emp_id, camera_id=camera_id,
                 snapshot_url=event.get("snapshot_url"),
             )
@@ -131,7 +133,7 @@ class AttendanceService:
         if employee.is_vip:
             await self.alerts.fire(
                 tenant_id, "vip",
-                f"VIP detected: {employee.full_name}",
+                f"{employee.full_name} has arrived.",
                 employee_id=emp_id, camera_id=camera_id,
                 snapshot_url=event.get("snapshot_url"),
             )
@@ -223,9 +225,12 @@ class AttendanceService:
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "confidence": conf,
             "camera_id": str(camera_id) if camera_id else None,
+            "direction": cam_direction,
             "status": log.status,
             "is_late": log.is_late,
             "late_by_min": log.late_by_min,
+            "is_early_leave": log.is_early_leave,
+            "early_by_min": log.early_by_min,
             "overtime_seconds": log.overtime_seconds,
             "snapshot_url": event.get("snapshot_url"),
         }
@@ -246,7 +251,7 @@ class AttendanceService:
         if outside:
             await self.alerts.fire(
                 tenant_id, "after_hours",
-                f"{employee.full_name} detected outside their shift window",
+                f"{employee.full_name} was seen on camera outside their scheduled shift hours. This may need a follow-up.",
                 employee_id=employee.id,
                 camera_id=cam.id if cam else None,
             )
@@ -272,7 +277,7 @@ class AttendanceService:
         # Always fire unknown_person alert so dashboard shows it immediately
         await self.alerts.fire(
             tenant_id, "unknown_person",
-            f"Unknown person detected on {cam_name}",
+            f"An unrecognised person was spotted on {cam_name}. They are not in the system.",
             camera_id=cam_uuid,
             snapshot_url=event.get("snapshot_url"),
         )
@@ -288,7 +293,7 @@ class AttendanceService:
         if hour < 7 or hour >= 20:
             await self.alerts.fire(
                 tenant_id, "intruder",
-                f"Unknown person detected outside business hours on {cam_name}",
+                f"An unidentified person was spotted on {cam_name} outside of working hours. Please investigate immediately.",
                 camera_id=cam_uuid,
                 snapshot_url=event.get("snapshot_url"),
             )
