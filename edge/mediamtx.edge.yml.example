@@ -39,12 +39,20 @@ srt: no
 # since this is an actual shell script, not a single folded line.
 paths:
   _srt_push:
+    # Low-latency flags — an uncapped source resolution/bitrate overwhelms
+    # encode CPU and home upload bandwidth, and ffmpeg buffers (does not
+    # drop) frames it can't keep up with, so latency grows unbounded over
+    # time if these aren't set. Adjust scale/bitrate to your upload speed.
     runOnInit: |
       sh -c '
       while true; do
-        ffmpeg -f mjpeg -i http://edge_node:8001/stream/CAMERA_ID_1 \
-          -c:v libx264 -preset ultrafast -tune zerolatency -f mpegts \
-          "srt://%CLOUD_HOST%:8890?streamid=publish:CAMERA_ID_1&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316"
+        ffmpeg -fflags nobuffer -flags low_delay -f mjpeg -i http://edge_node:8001/stream/CAMERA_ID_1 \
+          -vf scale=960:-2 -r 10 \
+          -c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline \
+          -bf 0 -sc_threshold 0 \
+          -b:v 800k -maxrate 800k -bufsize 800k -g 10 \
+          -max_delay 0 -flush_packets 1 -f mpegts \
+          "srt://%CLOUD_HOST%:8890?streamid=publish:CAMERA_ID_1&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316&latency=200"
         sleep 2
       done &
       wait

@@ -380,7 +380,7 @@ async def main():
     )
 
     face_search = FaissSearch(
-        threshold=float(os.getenv("RECOGNITION_THRESHOLD", cfg.get("recognition_threshold", 0.45))),
+        threshold=float(os.getenv("RECOGNITION_THRESHOLD", cfg.get("recognition_threshold", 0.35))),
         top_k=cfg.get("faiss_top_k", 5),
     )
 

@@ -19,7 +19,7 @@ det_size: 640
 # ════════════════════════════════════════════════════════════════════════════
 #  GLOBAL DEFAULTS
 # ════════════════════════════════════════════════════════════════════════════
-recognition_threshold: 0.45
+recognition_threshold: 0.35
 liveness_threshold: 0.28
 min_det_score: 0.32
 mask_det_min: 0.25
@@ -93,7 +93,7 @@ camera_profiles:
     cctv_mode: true
     skip_antispoof: true
     detect_bags: true
-    recognition_threshold: 0.38
+    recognition_threshold: 0.35
     liveness_threshold: 0.25
     min_det_score: 0.32
     enhance_faces: true
@@ -108,7 +108,7 @@ camera_profiles:
     cctv_mode: false
     skip_antispoof: true          # HiVideo heavy compression causes anti-spoof false positives
     detect_bags: false            # frontal entrance — no bag detection needed
-    recognition_threshold: 0.43
+    recognition_threshold: 0.35
     liveness_threshold: 0.35
     min_det_score: 0.32
     enhance_faces: true           # budget sensor benefits from enhancement
