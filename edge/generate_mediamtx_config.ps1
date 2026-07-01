@@ -23,9 +23,11 @@ if (-not $envVars.ContainsKey('MTX_SRTPUBLISHPASS') -or [string]::IsNullOrWhiteS
     exit 1
 }
 
-(Get-Content $Template -Raw) `
-    -replace '%CLOUD_HOST%', $envVars['CLOUD_HOST'] `
-    -replace '%MTX_SRTPUBLISHPASS%', $envVars['MTX_SRTPUBLISHPASS'] |
-    Set-Content -NoNewline -Encoding utf8 $OutFile
+$content = [System.IO.File]::ReadAllText((Resolve-Path $Template), [System.Text.Encoding]::UTF8)
+$content = $content -replace '%CLOUD_HOST%', $envVars['CLOUD_HOST']
+$content = $content -replace '%MTX_SRTPUBLISHPASS%', $envVars['MTX_SRTPUBLISHPASS']
+# Write UTF-8 without a BOM — a BOM at the start of the file breaks MediaMTX's YAML parser.
+$utf8NoBom = New-Object System.Text.UTF8Encoding $false
+[System.IO.File]::WriteAllText((Join-Path (Get-Location) $OutFile), $content, $utf8NoBom)
 
 Write-Host "[OK] Generated $OutFile"
