@@ -3,6 +3,7 @@ name: Deploy cloud stack to GCP VM
 on:
   push:
     branches: [cloud]
+  workflow_dispatch: {}
 
 jobs:
   deploy:
