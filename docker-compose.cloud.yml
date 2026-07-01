@@ -105,6 +105,8 @@ services:
         NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
         NEXT_PUBLIC_WS_URL: ${NEXT_PUBLIC_WS_URL}
         NEXT_PUBLIC_EDGE_URL: ${NEXT_PUBLIC_EDGE_URL:-}
+        # MediaMTX HLS output, e.g. http://35.253.8.57:8888 — see infra/mediamtx/mediamtx.cloud.yml
+        NEXT_PUBLIC_HLS_URL: ${NEXT_PUBLIC_HLS_URL:-}
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000"]

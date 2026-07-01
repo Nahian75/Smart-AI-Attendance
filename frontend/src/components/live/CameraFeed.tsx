@@ -1,5 +1,6 @@
 "use client";
 import { useEffect, useRef, useState, useCallback } from "react";
+import Hls from "hls.js";
 import { Video, WifiOff } from "lucide-react";
 
 interface Props {
@@ -26,12 +27,22 @@ export default function CameraFeed({ cameraId, cameraName, location, direction, 
   const [retry, setRetry] = useState(0);
   const failRef = useRef(0);           // consecutive failure count (not React state — no re-render)
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const hlsRef = useRef<Hls | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const retryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const deadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const baseUrl = process.env.NEXT_PUBLIC_EDGE_URL || "";
   const streamUrl = baseUrl ? `${baseUrl}/stream/${cameraId}` : `/stream/${cameraId}`;
+
+  // Cloud deployments push camera video to MediaMTX over SRT and serve it back
+  // as HLS (see infra/mediamtx/mediamtx.cloud.yml) — the edge node isn't on the
+  // same network as the dashboard, so MJPEG proxying via /stream/ isn't reachable.
+  // Path name must match the camera's id (see edge/mediamtx.edge.yml.example).
+  const hlsBaseUrl = process.env.NEXT_PUBLIC_HLS_URL || "";
+  const useHls = !!hlsBaseUrl;
+  const hlsUrl = `${hlsBaseUrl}/${cameraId}/index.m3u8`;
 
   const scheduleRetry = useCallback(() => {
     if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
@@ -56,9 +67,50 @@ export default function CameraFeed({ cameraId, cameraName, location, direction, 
     scheduleRetry();
   }, [scheduleRetry]);
 
-  // Each time retry increments, mount a fresh img and start polling naturalWidth.
+  // Each time retry increments, (re)connect the stream — HLS via hls.js, or
+  // mount a fresh img and poll naturalWidth for MJPEG.
   useEffect(() => {
     setLoading(true);
+
+    if (deadTimerRef.current) clearTimeout(deadTimerRef.current);
+    deadTimerRef.current = setTimeout(onFailure, FRAME_TIMEOUT_MS);
+
+    if (useHls) {
+      const video = videoRef.current;
+      if (!video) return;
+
+      const onSuccess = () => {
+        if (deadTimerRef.current) clearTimeout(deadTimerRef.current);
+        failRef.current = 0;
+        setOffline(false);
+        setLoading(false);
+        video.play().catch(() => {});
+      };
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({ lowLatencyMode: true });
+        hlsRef.current = hls;
+        hls.loadSource(hlsUrl);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, onSuccess);
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (data.fatal) onFailure();
+        });
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        video.src = hlsUrl;
+        video.addEventListener("loadedmetadata", onSuccess);
+        video.addEventListener("error", onFailure);
+      }
+
+      return () => {
+        if (hlsRef.current) {
+          hlsRef.current.destroy();
+          hlsRef.current = null;
+        }
+        if (deadTimerRef.current) clearTimeout(deadTimerRef.current);
+        if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
+      };
+    }
 
     // Poll naturalWidth — becomes > 0 once the browser renders the first MJPEG frame.
     // onLoad never fires for multipart/x-mixed-replace streams.
@@ -74,16 +126,12 @@ export default function CameraFeed({ cameraId, cameraName, location, direction, 
       }
     }, 500);
 
-    // Hard timeout: if no frame arrives within FRAME_TIMEOUT_MS, count as failure
-    if (deadTimerRef.current) clearTimeout(deadTimerRef.current);
-    deadTimerRef.current = setTimeout(onFailure, FRAME_TIMEOUT_MS);
-
     return () => {
       if (pollRef.current) clearInterval(pollRef.current);
       if (deadTimerRef.current) clearTimeout(deadTimerRef.current);
       if (retryTimerRef.current) clearTimeout(retryTimerRef.current);
     };
-  }, [retry, onFailure]);
+  }, [retry, onFailure, useHls, hlsUrl]);
 
   const isOnline = status === "online";
 
@@ -91,7 +139,18 @@ export default function CameraFeed({ cameraId, cameraName, location, direction, 
     <div className={`relative aspect-video bg-gray-950 flex items-center justify-center ${streamOnly ? "rounded-lg overflow-hidden mb-3" : ""}`}>
       {/* img is always mounted (unless we give up after many failures) so the
           browser keeps the connection alive. The offline overlay sits on top. */}
-      {!offline && (
+      {!offline && useHls && (
+        <video
+          ref={videoRef}
+          key={`${hlsUrl}-${retry}`}
+          muted
+          autoPlay
+          playsInline
+          className="h-full w-full object-contain"
+          onError={onFailure}
+        />
+      )}
+      {!offline && !useHls && (
         <img
           ref={imgRef}
           key={`${streamUrl}-${retry}`}

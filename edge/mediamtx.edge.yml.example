@@ -25,8 +25,13 @@ srt: no
 
 paths:
   # ── Example: replace with your actual camera RTSP URLs ──────────
-  # Duplicate this block per camera; the path name (cam1, cam2, ...)
-  # becomes the stream name on the cloud dashboard.
+  # Duplicate this block per camera. The path name (cam1 below) MUST
+  # match that camera's id in the backend (Cameras page in the
+  # dashboard — the UUID shown in the camera's edit view), because the
+  # dashboard builds the HLS playback URL as
+  # <NEXT_PUBLIC_HLS_URL>/<camera_id>/index.m3u8. If you rename cam1,
+  # update it in all THREE places below: the path key, the local rtsp://
+  # source URL, and streamid=publish:<name> in the SRT push URL.
   cam1:
     source: rtsp://USER:PASS@CAMERA_IP:554/Streaming/Channels/101
     sourceOnDemand: no
