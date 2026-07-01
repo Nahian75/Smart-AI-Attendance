@@ -1,4 +1,11 @@
 @echo off
+:: Relaunch inside a "cmd /k" window so it stays open no matter what happens
+:: below — even a hard crash before reaching a pause won't close it.
+if "%~1" neq "_run" (
+    start "Smart AI Attendance - Edge Node" cmd /k ""%~f0" _run"
+    exit /b
+)
+
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
