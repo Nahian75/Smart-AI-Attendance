@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 .env
 .env.edge
+edge/mediamtx.edge.yml
 edge/mediamtx.edge.generated.yml
 .venv/
 node_modules/

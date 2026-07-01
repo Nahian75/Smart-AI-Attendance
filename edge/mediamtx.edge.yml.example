@@ -8,6 +8,10 @@
 #  Add one entry under `paths:` per camera. `%CLOUD_HOST%` and
 #  `%MTX_SRTPUBLISHPASS%` are substituted from .env.edge by
 #  start_edge.bat before this file is mounted into the mediamtx container.
+#
+#  Copy this file to edge/mediamtx.edge.yml (gitignored — contains real
+#  camera credentials) and fill in your actual RTSP URLs. start_edge.bat
+#  will offer to create it from this template automatically if missing.
 # ================================================================
 
 logLevel: info

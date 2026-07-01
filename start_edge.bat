@@ -40,8 +40,18 @@ if not exist ".env.edge" (
     exit /b 1
 )
 
+:: Create edge\mediamtx.edge.yml (real camera credentials, gitignored) from
+:: the committed placeholder template if missing
 if not exist "edge\mediamtx.edge.yml" (
-    echo  [ERROR] edge\mediamtx.edge.yml not found.
+    if not exist "edge\mediamtx.edge.yml.example" (
+        echo  [ERROR] edge\mediamtx.edge.yml.example not found.
+        pause
+        exit /b 1
+    )
+    echo  [SETUP] Creating edge\mediamtx.edge.yml from template...
+    copy /y "edge\mediamtx.edge.yml.example" "edge\mediamtx.edge.yml" >nul
+    echo  [WARN]  edge\mediamtx.edge.yml has placeholder camera RTSP URLs.
+    echo          Edit it with your real cameras, then re-run this script.
     pause
     exit /b 1
 )
