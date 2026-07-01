@@ -1,11 +1,13 @@
 from datetime import date
 from typing import Optional
+import os
 import uuid
 
-from fastapi import APIRouter, Depends, Query, BackgroundTasks, HTTPException
+from fastapi import APIRouter, Depends, Query, BackgroundTasks, HTTPException, UploadFile, File, Form
 from sqlalchemy import select, delete as sql_delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ...config import settings
 from ...dependencies import get_db, get_redis, get_current_user, role_required, verify_edge_token, CurrentUser
 from ...services.attendance_service import AttendanceService
 from ...schemas.attendance import (
@@ -41,6 +43,27 @@ async def receive_event(
     tid = await _resolve_tenant(tenant_id, db)
     service = AttendanceService(db, redis)
     return await service.process_recognition_event(event.model_dump(mode="json"), tid)
+
+
+@router.post("/upload-snapshot", summary="Upload a detection snapshot from a remote edge node")
+async def upload_snapshot(
+    file: UploadFile = File(...),
+    relative_path: str = Form(...),
+    _: None = Depends(verify_edge_token),
+):
+    """Edge nodes that don't share a filesystem/volume with the backend (e.g. a
+    cloud deployment where the edge runs on-prem) can't rely on SNAPSHOT_DIR
+    being mounted in both containers. This lets the edge push the actual image
+    bytes so they land in the same place a co-located edge would have written
+    them, keeping snapshot_url values consistent either way."""
+    safe_rel = os.path.normpath(relative_path).replace("\\", "/").lstrip("/")
+    if safe_rel.startswith(".."):
+        raise HTTPException(400, "Invalid relative_path")
+    dest = os.path.join(settings.SNAPSHOT_DIR, safe_rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    with open(dest, "wb") as f:
+        f.write(await file.read())
+    return {"snapshot_url": dest}
 
 
 @router.get("/logs", response_model=list[AttendanceLogOut])

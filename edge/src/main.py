@@ -402,7 +402,7 @@ async def main():
     mjpeg = MJPEGServer(port=int(os.getenv("MJPEG_PORT", "8001")))
     await mjpeg.start()
 
-    publisher = EventPublisher(redis_url, backend_url, tenant_id)
+    publisher = EventPublisher(redis_url, backend_url, tenant_id, snapshot_dir=snapshot_dir)
     publisher.set_token(token_ref[0])
     loop = asyncio.get_running_loop()
 
