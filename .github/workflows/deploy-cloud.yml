@@ -16,8 +16,9 @@ jobs:
           key: ${{ secrets.GCP_VM_SSH_KEY }}
           port: ${{ secrets.GCP_VM_PORT }}
           script_stop: true
-          # Every env var docker-compose.cloud.yml references, pulled straight
-          # from GitHub repo secrets — nothing is checked into the repo.
+          # appleboy/ssh-action's `envs:` only forwards vars that already exist
+          # in the RUNNER's environment — they must be explicitly mapped from
+          # secrets here first, or they arrive empty on the remote side.
           envs: >-
             POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,
             REDIS_PASSWORD,SECRET_KEY,FACE_ENCRYPTION_KEY,
@@ -25,6 +26,24 @@ jobs:
             ALLOWED_ORIGINS,EDGE_TOKEN,TENANT_ID,
             NEXT_PUBLIC_API_URL,NEXT_PUBLIC_WS_URL,NEXT_PUBLIC_EDGE_URL,
             NEXT_PUBLIC_HLS_URL,MTX_SRTPUBLISHPASS
+        env:
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          REDIS_PASSWORD: ${{ secrets.REDIS_PASSWORD }}
+          SECRET_KEY: ${{ secrets.SECRET_KEY }}
+          FACE_ENCRYPTION_KEY: ${{ secrets.FACE_ENCRYPTION_KEY }}
+          CONFIDENCE_THRESHOLD: ${{ secrets.CONFIDENCE_THRESHOLD }}
+          COOLDOWN_MINUTES: ${{ secrets.COOLDOWN_MINUTES }}
+          EVENT_RETENTION_DAYS: ${{ secrets.EVENT_RETENTION_DAYS }}
+          ALLOWED_ORIGINS: ${{ secrets.ALLOWED_ORIGINS }}
+          EDGE_TOKEN: ${{ secrets.EDGE_TOKEN }}
+          TENANT_ID: ${{ secrets.TENANT_ID }}
+          NEXT_PUBLIC_API_URL: ${{ secrets.NEXT_PUBLIC_API_URL }}
+          NEXT_PUBLIC_WS_URL: ${{ secrets.NEXT_PUBLIC_WS_URL }}
+          NEXT_PUBLIC_EDGE_URL: ${{ secrets.NEXT_PUBLIC_EDGE_URL }}
+          NEXT_PUBLIC_HLS_URL: ${{ secrets.NEXT_PUBLIC_HLS_URL }}
+          MTX_SRTPUBLISHPASS: ${{ secrets.MTX_SRTPUBLISHPASS }}
           script: |
             set -e
             REPO_DIR="$HOME/Smart-AI-Attendance"
