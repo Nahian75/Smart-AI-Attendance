@@ -1,0 +1,39 @@
+# ================================================================
+#  MediaMTX server config — runs on the GCP VM (cloud side).
+#  Accepts SRT publish connections pushed outbound from the edge
+#  node (see edge/mediamtx.edge.yml) and re-serves them as HLS/WebRTC.
+# ================================================================
+
+logLevel: info
+
+# ── SRT ingest ──────────────────────────────────────────────────
+srt: yes
+srtAddress: :8890
+
+# srtPublishPassphrase is set for all paths via pathDefaults below, and its
+# actual value comes from the MTX_PATHDEFAULTS_SRTPUBLISHPASSPHRASE env var
+# in docker-compose.cloud.yml (sourced from MTX_SRTPUBLISHPASS in .env.cloud).
+# Publishers connect with: srt://<host>:8890?streamid=publish:<path>&passphrase=<value>
+pathDefaults:
+  srtPublishPassphrase: ""
+
+# ── HLS output (for the dashboard <video> player) ──────────────
+hls: yes
+hlsAddress: :8888
+hlsAllowOrigins: "*"
+hlsVariant: lowLatency
+
+# ── WebRTC output (optional, lower latency than HLS) ────────────
+webrtc: yes
+webrtcAddress: :8889
+
+# ── RTSP/RTMP disabled — SRT-only ingest from the edge ───────────
+rtsp: no
+rtmp: no
+
+# ── Paths ─────────────────────────────────────────────────────────
+# `all_others` accepts any path name pushed via SRT (one per camera id,
+# e.g. cam1, cam2 — matching the camera IDs configured on the edge side).
+# No static per-camera entries needed; MediaMTX creates paths on publish.
+paths:
+  all_others:

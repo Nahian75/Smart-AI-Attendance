@@ -1,0 +1,61 @@
+name: Deploy cloud stack to GCP VM
+
+on:
+  push:
+    branches: [cloud]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: SSH, write .env from secrets, and run start_cloud.sh on the VM
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.GCP_VM_HOST }}
+          username: ${{ secrets.GCP_VM_USER }}
+          key: ${{ secrets.GCP_VM_SSH_KEY }}
+          port: ${{ secrets.GCP_VM_PORT }}
+          script_stop: true
+          # Every env var docker-compose.cloud.yml references, pulled straight
+          # from GitHub repo secrets — nothing is checked into the repo.
+          envs: >-
+            POSTGRES_USER,POSTGRES_PASSWORD,POSTGRES_DB,
+            REDIS_PASSWORD,SECRET_KEY,FACE_ENCRYPTION_KEY,
+            CONFIDENCE_THRESHOLD,COOLDOWN_MINUTES,EVENT_RETENTION_DAYS,
+            ALLOWED_ORIGINS,EDGE_TOKEN,TENANT_ID,
+            NEXT_PUBLIC_API_URL,NEXT_PUBLIC_WS_URL,NEXT_PUBLIC_EDGE_URL,
+            MTX_SRTPUBLISHPASS
+          script: |
+            set -e
+            REPO_DIR="$HOME/Smart-AI-Attendance"
+            if [ ! -d "$REPO_DIR/.git" ]; then
+              git clone --branch cloud https://github.com/Nahian75/Smart-AI-Attendance.git "$REPO_DIR"
+            fi
+            cd "$REPO_DIR"
+            git fetch origin cloud
+            git checkout cloud
+            git reset --hard origin/cloud
+
+            cat > .env <<EOF
+            POSTGRES_USER=${POSTGRES_USER}
+            POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+            POSTGRES_DB=${POSTGRES_DB}
+            REDIS_PASSWORD=${REDIS_PASSWORD}
+            SECRET_KEY=${SECRET_KEY}
+            ENVIRONMENT=production
+            FACE_ENCRYPTION_KEY=${FACE_ENCRYPTION_KEY}
+            CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD:-0.82}
+            COOLDOWN_MINUTES=${COOLDOWN_MINUTES:-5}
+            EVENT_RETENTION_DAYS=${EVENT_RETENTION_DAYS:-90}
+            ALLOWED_ORIGINS=${ALLOWED_ORIGINS}
+            EDGE_TOKEN=${EDGE_TOKEN}
+            TENANT_ID=${TENANT_ID:-demo}
+            NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+            NEXT_PUBLIC_WS_URL=${NEXT_PUBLIC_WS_URL}
+            NEXT_PUBLIC_EDGE_URL=${NEXT_PUBLIC_EDGE_URL}
+            MTX_SRTPUBLISHPASS=${MTX_SRTPUBLISHPASS}
+            EOF
+            chmod 600 .env
+
+            chmod +x start_cloud.sh
+            ./start_cloud.sh

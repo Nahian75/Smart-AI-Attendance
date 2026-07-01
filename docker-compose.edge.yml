@@ -1,0 +1,45 @@
+# ================================================================
+#  Edge compose — runs ONLY the edge node, locally on-prem.
+#  Talks to the cloud stack (docker-compose.cloud.yml) remotely over
+#  BACKEND_URL / REDIS_URL. No postgres/redis/frontend runs here.
+#
+#  Usage:  start_edge.bat  (Windows)
+#  Manual: docker compose -f docker-compose.edge.yml --env-file .env.edge up -d --build
+# ================================================================
+
+name: smart-attendance-edge
+
+services:
+  edge_node:
+    build:
+      context: ./edge
+      dockerfile: Dockerfile.edge.cpu
+    restart: unless-stopped
+    environment:
+      REDIS_URL: redis://:${REDIS_PASSWORD}@${CLOUD_HOST}:6379/0
+      BACKEND_URL: http://${CLOUD_HOST}
+      TENANT_ID: ${TENANT_ID:-demo}
+      DEVICE: cpu
+      EDGE_TOKEN: ${EDGE_TOKEN:-}
+      EDGE_USER: ${EDGE_USER:-admin@demo.com}
+      EDGE_PASS: ${EDGE_PASS:-admin123}
+    ports: ["8001:8001"]
+    volumes:
+      - ./edge/config:/app/config
+      - edge_snapshots:/app/snapshots
+      - edge_models:/root/.insightface
+      - edge_yolo:/root/.config/Ultralytics
+
+  # ── MediaMTX: pulls camera RTSP locally, pushes SRT out to the cloud VM ──
+  # start_edge.bat generates mediamtx.edge.generated.yml from
+  # edge/mediamtx.edge.yml with CLOUD_HOST/MTX_SRTPUBLISHPASS substituted.
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    volumes:
+      - ./edge/mediamtx.edge.generated.yml:/mediamtx.yml:ro
+
+volumes:
+  edge_snapshots:
+  edge_models:
+  edge_yolo:

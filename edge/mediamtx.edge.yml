@@ -1,0 +1,42 @@
+# ================================================================
+#  MediaMTX config — runs LOCALLY on the edge machine (start_edge.bat).
+#  Pulls each camera's RTSP stream and pushes it out as SRT to the
+#  cloud VM's MediaMTX ingest (infra/mediamtx/mediamtx.cloud.yml),
+#  so the dashboard can view live video without opening any inbound
+#  port on your home network (the edge always initiates the connection).
+#
+#  Add one entry under `paths:` per camera. `%CLOUD_HOST%` and
+#  `%MTX_SRTPUBLISHPASS%` are substituted from .env.edge by
+#  start_edge.bat before this file is mounted into the mediamtx container.
+# ================================================================
+
+logLevel: info
+
+# No local playback servers needed — this instance only relays outbound.
+rtsp: yes
+rtspAddress: :8554
+hls: no
+webrtc: no
+srt: no
+
+paths:
+  # ── Example: replace with your actual camera RTSP URLs ──────────
+  # Duplicate this block per camera; the path name (cam1, cam2, ...)
+  # becomes the stream name on the cloud dashboard.
+  cam1:
+    source: rtsp://USER:PASS@CAMERA_IP:554/Streaming/Channels/101
+    sourceOnDemand: no
+    runOnReady: >
+      ffmpeg -rtsp_transport tcp -i rtsp://localhost:8554/cam1
+      -c copy -f mpegts
+      "srt://%CLOUD_HOST%:8890?streamid=publish:cam1&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316"
+    runOnReadyRestart: yes
+
+  # cam2:
+  #   source: rtsp://USER:PASS@CAMERA_IP2:554/Streaming/Channels/101
+  #   sourceOnDemand: no
+  #   runOnReady: >
+  #     ffmpeg -rtsp_transport tcp -i rtsp://localhost:8554/cam2
+  #     -c copy -f mpegts
+  #     "srt://%CLOUD_HOST%:8890?streamid=publish:cam2&passphrase=%MTX_SRTPUBLISHPASS%&pkt_size=1316"
+  #   runOnReadyRestart: yes
