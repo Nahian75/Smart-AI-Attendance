@@ -14,9 +14,11 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     beat_schedule={
-        "mark-absentees-nightly": {
+        "mark-absentees-hourly": {
+            # Hourly so each branch's local midnight (00:00-03:59) is caught by
+            # some tick regardless of timezone offset — see tasks.mark_absentees.
             "task": "app.workers.tasks.mark_absentees",
-            "schedule": crontab(hour=23, minute=30),
+            "schedule": crontab(minute=30),
         },
         "apply-retention-daily": {
             "task": "app.workers.tasks.apply_retention",

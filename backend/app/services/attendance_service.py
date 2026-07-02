@@ -344,6 +344,57 @@ class AttendanceService:
         )
         return (await self.db.execute(stmt)).scalar_one_or_none()
 
+    # ── Recompute on shift edit / reassignment ──────────────────────────────
+    async def recompute_logs_for_shift(self, shift: Shift, date_from: date):
+        """Re-derive is_late/status/is_early_leave/overtime_seconds for existing
+        AttendanceLog rows tied to this shift, using the shift's current values.
+        Call after a shift's times/grace/work_days are edited so already-created
+        logs reflect the new rule instead of the one active at check-in time."""
+        stmt = select(AttendanceLog).where(
+            AttendanceLog.shift_id == shift.id,
+            AttendanceLog.attendance_date >= date_from,
+        )
+        logs = (await self.db.execute(stmt)).scalars().all()
+        for log in logs:
+            await self._recompute_log(log, shift)
+        await self.db.commit()
+
+    async def recompute_log(self, log: "AttendanceLog", shift: Shift):
+        """Public single-log variant, used after an employee is reassigned to a
+        different shift so today's already-created log picks up the new shift."""
+        await self._recompute_log(log, shift)
+        await self.db.commit()
+
+    async def _recompute_log(self, log, shift: Shift):
+        branch = await self.db.get(Branch, log.branch_id) if log.branch_id else None
+        tz = pytz.timezone(branch.timezone if branch else "UTC")
+        day = log.attendance_date
+        log.shift_id = shift.id
+
+        if log.check_in_at:
+            now_local = log.check_in_at.astimezone(tz)
+            scheduled = tz.localize(datetime.combine(day, shift.start_time))
+            late_min = (now_local - (scheduled + timedelta(minutes=shift.grace_in_min))).total_seconds() / 60
+            if late_min > 0:
+                log.is_late = True
+                log.late_by_min = int(late_min)
+                if log.status != "absent":
+                    log.status = "late"
+            else:
+                log.is_late = False
+                log.late_by_min = 0
+                if log.status == "late":
+                    log.status = "present"
+
+        if log.check_out_at:
+            now_local_out = log.check_out_at.astimezone(tz)
+            scheduled_out = tz.localize(datetime.combine(day, shift.end_time))
+            early_min = ((scheduled_out - timedelta(minutes=shift.early_out_min)) - now_local_out).total_seconds() / 60
+            log.is_early_leave = early_min > 0
+            log.early_by_min = int(early_min) if early_min > 0 else 0
+            ot_sec = (now_local_out - scheduled_out).total_seconds()
+            log.overtime_seconds = int(ot_sec) if ot_sec > 0 else 0
+
     async def _get_or_create_log(self, employee, day, shift, tenant_id):
         stmt = select(AttendanceLog).where(
             AttendanceLog.employee_id == employee.id,

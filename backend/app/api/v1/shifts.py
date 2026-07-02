@@ -8,7 +8,8 @@ from sqlalchemy import select, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...dependencies import get_db, get_current_user, role_required, CurrentUser
-from ...models import Shift, EmployeeShift, Employee
+from ...models import Shift, EmployeeShift, Employee, AttendanceLog
+from ...services.attendance_service import AttendanceService
 
 router = APIRouter()
 
@@ -104,7 +105,10 @@ async def update_shift(
     s.grace_in_min = payload.grace_in_min
     s.early_out_min = payload.early_out_min
     s.work_days = payload.work_days
-    await db.commit()
+    await db.flush()
+    # Existing logs were computed against the old shift times — re-derive
+    # late/early/overtime for today's and future logs so the edit takes effect.
+    await AttendanceService(db).recompute_logs_for_shift(s, date.today())
     return _fmt_shift(s)
 
 
@@ -192,6 +196,22 @@ async def assign_shift(
         effective_to=payload.effective_to,
     )
     db.add(new_es)
+    await db.flush()
+
+    # If the new assignment already covers today and a log exists, move it onto
+    # the new shift now instead of leaving it tied to the old shift until the
+    # next check-in — otherwise a reassignment silently has no visible effect.
+    today = date.today()
+    if payload.effective_from <= today and (payload.effective_to is None or payload.effective_to > today):
+        todays_log = (await db.execute(
+            select(AttendanceLog).where(
+                AttendanceLog.employee_id == payload.employee_id,
+                AttendanceLog.attendance_date == today,
+            )
+        )).scalar_one_or_none()
+        if todays_log:
+            await AttendanceService(db).recompute_log(todays_log, sh)
+
     await db.commit()
     return {
         "employee_id": str(payload.employee_id),

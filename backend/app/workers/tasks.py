@@ -30,28 +30,61 @@ def apply_retention():
 
 @celery_app.task
 def mark_absentees():
-    """Create absent records for active employees with no log today."""
+    """Finalize the previous local day for each employee: create an absent record
+    if no attendance log exists, skipping days outside the employee's assigned
+    shift's work_days. Runs hourly (see celery_app.py); for each employee we only
+    act once their branch has passed local midnight (00:00-03:59 local window),
+    so branches in different timezones get finalized at their own local end-of-day
+    instead of a single fixed UTC time."""
     async def _do():
-        from datetime import date
-        today = date.today()
+        import pytz
+        from ..models import Branch, EmployeeShift, Shift
+
         async with AsyncSessionLocal() as db:
-            emps = (await db.execute(
-                select(Employee).where(Employee.is_active.is_(True))
-            )).scalars().all()
-            for e in emps:
+            rows = (await db.execute(
+                select(Employee, Branch)
+                .outerjoin(Branch, Branch.id == Employee.branch_id)
+                .where(Employee.is_active.is_(True))
+            )).all()
+
+            for e, branch in rows:
+                tz = pytz.timezone(branch.timezone if branch else "UTC")
+                now_local = datetime.now(timezone.utc).astimezone(tz)
+                if now_local.hour >= 4:
+                    continue  # not yet this employee's local finalize window
+                target_date = now_local.date() - timedelta(days=1)
+
                 existing = (await db.execute(
                     select(AttendanceLog).where(
                         AttendanceLog.employee_id == e.id,
                         AttendanceLog.tenant_id == e.tenant_id,
-                        AttendanceLog.attendance_date == today,
+                        AttendanceLog.attendance_date == target_date,
                     )
                 )).scalar_one_or_none()
-                if not existing:
-                    db.add(AttendanceLog(
-                        tenant_id=e.tenant_id, employee_id=e.id,
-                        branch_id=e.branch_id, attendance_date=today,
-                        status="absent",
-                    ))
+                if existing:
+                    continue
+
+                shift = (await db.execute(
+                    select(Shift).join(EmployeeShift, EmployeeShift.shift_id == Shift.id)
+                    .where(
+                        EmployeeShift.employee_id == e.id,
+                        EmployeeShift.effective_from <= target_date,
+                        (EmployeeShift.effective_to.is_(None)) | (EmployeeShift.effective_to > target_date),
+                        Shift.is_active.is_(True),
+                    )
+                    .order_by(EmployeeShift.effective_from.desc())
+                    .limit(1)
+                )).scalar_one_or_none()
+
+                if shift and target_date.isoweekday() not in (shift.work_days or [1, 2, 3, 4, 5]):
+                    continue  # not a scheduled work day for this employee
+
+                db.add(AttendanceLog(
+                    tenant_id=e.tenant_id, employee_id=e.id,
+                    branch_id=e.branch_id, attendance_date=target_date,
+                    shift_id=shift.id if shift else None,
+                    status="absent",
+                ))
             await db.commit()
     _run(_do())
     return "absentees marked"
